@@ -159,10 +159,15 @@ agent never self-certifies its own work order.
 ### Ticket File
 
 The on-disk form of a Ticket: one markdown file per Ticket at
-`.dsh-kanban/tickets/<id>-<slug>.md`, with frontmatter for state (column,
-Issue link, branch, Worktree path) and the body as the description. The Board
-renders by scanning the directory; Agent Sessions read and edit Ticket Files
-with plain file tools.
+`.dsh-kanban/tickets/<id>-<slug>.md`, with frontmatter for state and the
+body as the description. The Board renders by scanning the directory; Agent
+Sessions read and edit Ticket Files with plain file tools.
+
+Frontmatter keys: `id` (KAN-<n>), `title`, `column` (one of `backlog`,
+`ready`, `in-progress`, `in-review`, `done` — kebab-case), `issue` (Issue
+URL, empty when none), `branch`, `worktree`, `session` (Agent Session id).
+Values are scalars on one line; multi-line YAML is not used. The parser
+lives in `plugin/frontmatter.js` and is the tested seam for the format.
 
 ## Execution concepts
 

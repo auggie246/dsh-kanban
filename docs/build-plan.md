@@ -94,6 +94,9 @@ Vocabulary throughout follows `CONTEXT.md`; rationale lives in `docs/adr/`.
 - Autopilot: per-workspace opt-in; board-spawned sessions run with the
   elevated policy for that workspace; off = Attention Badge flow (M2).
 - Empty states, error surfaces, board ordering polish.
+- Icon polish (user feedback, M0 review, 2026-07-23): replace the text-only
+  sidebar Kanban button with a real board icon like the shipped shell buttons
+  (Icon*16 primitives), and make the Board's Close button an X icon.
 
 ## Permanence note
 

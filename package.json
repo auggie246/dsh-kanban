@@ -1,0 +1,8 @@
+{
+  "name": "dsh-kanban",
+  "private": true,
+  "description": "A DeepSeek Harness plugin: a workspace-level kanban board acting as an orchestration layer for agent sessions.",
+  "scripts": {
+    "test": "node --test plugin/"
+  }
+}

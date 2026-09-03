@@ -11,3 +11,13 @@ tab in `conversation.view` as a shortcut. Board settings live in
 `settings.section`. This keeps every integration point additive (replaceRisk:
 none on all four seats) so DSH shell upgrades cannot silently break the board,
 at the cost of one sidebar click instead of a per-row button.
+
+Amendment (M0, user request, 2026-07-23): the plugin stylesheet also restyles
+the shipped foot container — `.hHd-Xa_footerActions{flex-direction:column}` —
+so foot actions stack vertically (Cordis pill, Kanban, Settings). This is the
+one deliberate bend of the additive-only rule: the foot slot composes entries
+in a single horizontal row and no slot can restack them. Accepted because the
+failure mode on a shell upgrade is safe: if the hashed class name changes, the
+rule stops matching and actions fall back to the shipped row layout — a visual
+degradation, never a broken Board. If DSH ever offers a vertical foot or a
+second foot slot, delete the rule with no other change.
