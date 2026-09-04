@@ -1,6 +1,14 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { parseTicketFile, KANBAN_COLUMNS } = require('./frontmatter.js')
+const {
+  parseTicketFile,
+  KANBAN_COLUMNS,
+  kanbanSlug,
+  kanbanNextId,
+  serializeTicketFile,
+  kanbanSetAttr,
+  kanbanSetBody,
+} = require('./frontmatter.js')
 
 test('columns are exactly the five Board columns in order', () => {
   assert.deepEqual(KANBAN_COLUMNS, ['backlog', 'ready', 'in-progress', 'in-review', 'done'])
@@ -74,6 +82,163 @@ test('preview skips headings and blanks, and truncates at 160 characters', () =>
   assert.equal(card.preview.length <= 160, true)
   assert.equal(card.preview.endsWith('…'), true)
   assert.equal(card.preview.startsWith('word'), true)
+})
+
+test('kanbanSlug makes a lowercase dash slug from the title', () => {
+  assert.equal(kanbanSlug('Fix login bug'), 'fix-login-bug')
+  assert.equal(kanbanSlug('Hello, World! (v2)'), 'hello-world-v2')
+})
+
+test('kanbanSlug falls back to ticket for an empty title', () => {
+  assert.equal(kanbanSlug(''), 'ticket')
+  assert.equal(kanbanSlug('!!!'), 'ticket')
+})
+
+test('kanbanSlug truncates at 40 characters without a trailing dash', () => {
+  const slug = kanbanSlug('a very long ticket title that keeps on going and going')
+  assert.equal(slug.length <= 40, true)
+  assert.equal(slug.endsWith('-'), false)
+})
+
+test('kanbanNextId starts at KAN-101 on an empty Board', () => {
+  assert.equal(kanbanNextId([]), 'KAN-101')
+})
+
+test('kanbanNextId continues above the highest existing id', () => {
+  assert.equal(kanbanNextId(['KAN-101', 'KAN-103', 'KAN-102']), 'KAN-104')
+})
+
+test('kanbanNextId never goes below KAN-101', () => {
+  assert.equal(kanbanNextId(['KAN-1']), 'KAN-101')
+  assert.equal(kanbanNextId(['KAN-99']), 'KAN-101')
+})
+
+test('kanbanNextId ignores non-KAN names', () => {
+  assert.equal(kanbanNextId(['README.md', 'notes', null, undefined]), 'KAN-101')
+})
+
+test('serializeTicketFile writes keys in canonical order and plain scalars', () => {
+  const text = serializeTicketFile(
+    { id: 'KAN-104', title: 'Watch loop', column: 'ready' },
+    '# Watch loop\n\nBody.\n',
+  )
+  assert.equal(
+    text,
+    '---\nid: KAN-104\ntitle: Watch loop\ncolumn: ready\n---\n# Watch loop\n\nBody.\n',
+  )
+})
+
+test('serializeTicketFile writes an empty issue as a quoted empty scalar', () => {
+  const text = serializeTicketFile(
+    { id: 'KAN-2', title: 'x', column: 'backlog', blocked: 'Waiting on review', issue: '' },
+    'b\n',
+  )
+  assert.equal(
+    text,
+    '---\nid: KAN-2\ntitle: x\ncolumn: backlog\nblocked: Waiting on review\nissue: ""\n---\nb\n',
+  )
+})
+
+test('serializeTicketFile drops keys outside the documented frontmatter set', () => {
+  const text = serializeTicketFile(
+    { id: 'KAN-2', title: 'x', column: 'backlog', mood: 'experimental' },
+    'b',
+  )
+  assert.equal(text, '---\nid: KAN-2\ntitle: x\ncolumn: backlog\n---\nb\n')
+})
+
+test('serializeTicketFile folds newlines inside a scalar into spaces', () => {
+  const text = serializeTicketFile(
+    { id: 'KAN-1', title: 'x', column: 'backlog', blocked: 'line one\nline two' },
+    'b',
+  )
+  assert.equal(text.includes('blocked: line one line two\n'), true)
+})
+
+test('serializeTicketFile output parses back to the same card', () => {
+  const attrs = { id: 'KAN-7', title: 'Card editing', column: 'in-progress', blocked: 'reason' }
+  const body = '# Card editing\n\nGoal\n\nContext\n'
+  const card = parseTicketFile('KAN-7-card-editing.md', serializeTicketFile(attrs, body))
+  assert.equal(card.id, 'KAN-7')
+  assert.equal(card.title, 'Card editing')
+  assert.equal(card.column, 'in-progress')
+  assert.equal(card.body, body)
+})
+
+test('serializeTicketFile ensures the body ends with one newline', () => {
+  const text = serializeTicketFile({ id: 'KAN-1', title: 'x', column: 'backlog' }, 'no trailing newline')
+  assert.equal(text.endsWith('no trailing newline\n'), true)
+})
+
+test('serializeTicketFile quotes scalars containing YAML-breaking characters', () => {
+  const text = serializeTicketFile({ id: 'KAN-1', title: 'Fix: login flow', column: 'backlog' }, 'b')
+  assert.equal(text, '---\nid: KAN-1\ntitle: "Fix: login flow"\ncolumn: backlog\n---\nb\n')
+})
+
+test('serializeTicketFile escapes quotes and backslashes in blocked reasons', () => {
+  const text = serializeTicketFile(
+    { id: 'KAN-1', title: 'x', column: 'backlog', blocked: 'He said "no"' },
+    'b',
+  )
+  assert.equal(text.includes('blocked: "He said \\"no\\""\n'), true)
+})
+
+test('parser unescapes quotes and backslashes in double-quoted values', () => {
+  const text = '---\nid: KAN-1\ntitle: "He said \\"no\\""\ncolumn: backlog\nblocked: "at C:\\\\temp"\n---\nb'
+  const card = parseTicketFile('KAN-1-x.md', text)
+  assert.equal(card.title, 'He said "no"')
+  assert.equal(card.blocked, 'at C:\\temp')
+})
+
+test('kanbanSetAttr rewrites only the target line, body stays byte-identical', () => {
+  const before = '---\nid: KAN-3\ntitle: Watch loop\ncolumn: ready\nissue: x\n---\n# Body\n\ncolumn: not frontmatter\n'
+  const after = '---\nid: KAN-3\ntitle: Watch loop\ncolumn: in-progress\nissue: x\n---\n# Body\n\ncolumn: not frontmatter\n'
+  assert.equal(kanbanSetAttr(before, 'column', 'in-progress'), after)
+})
+
+test('kanbanSetAttr inserts a missing key before the closing fence', () => {
+  const before = '---\nid: KAN-1\ntitle: x\n---\nbody\n'
+  const after = '---\nid: KAN-1\ntitle: x\nblocked: reason\n---\nbody\n'
+  assert.equal(kanbanSetAttr(before, 'blocked', 'reason'), after)
+})
+
+test('kanbanSetAttr removes the key when the value is empty or null', () => {
+  const before = '---\nid: KAN-1\ncolumn: ready\nblocked: reason\n---\nbody\n'
+  const after = '---\nid: KAN-1\ncolumn: ready\n---\nbody\n'
+  assert.equal(kanbanSetAttr(before, 'blocked', ''), after)
+  assert.equal(kanbanSetAttr(before, 'blocked', null), after)
+})
+
+test('kanbanSetAttr returns null when the text has no frontmatter', () => {
+  assert.equal(kanbanSetAttr('no fence here', 'column', 'done'), null)
+})
+
+test('kanbanSetAttr preserves CRLF line endings in the frontmatter', () => {
+  const before = '---\r\nid: KAN-3\r\ntitle: x\r\ncolumn: ready\r\n---\r\nbody line\r\n'
+  const after = '---\r\nid: KAN-3\r\ntitle: x\r\ncolumn: done\r\n---\r\nbody line\r\n'
+  assert.equal(kanbanSetAttr(before, 'column', 'done'), after)
+})
+
+test('kanbanSetBody preserves CRLF line endings in the frontmatter', () => {
+  const before = '---\r\nid: KAN-3\r\ntitle: x\r\n---\r\nold\r\n'
+  const after = '---\r\nid: KAN-3\r\ntitle: x\r\n---\r\nnew\n'
+  assert.equal(kanbanSetBody(before, 'new'), after)
+})
+
+test('kanbanSetBody replaces everything after the closing fence', () => {
+  const before = '---\nid: KAN-1\ntitle: x\n---\nold body\nmore old\n'
+  const after = '---\nid: KAN-1\ntitle: x\n---\nnew body\n'
+  assert.equal(kanbanSetBody(before, 'new body'), after)
+})
+
+test('kanbanSetBody leaves the frontmatter byte-identical', () => {
+  const before = '---\nid: KAN-1\nblocked: "a \\"b\\" c"\n---\nx\n'
+  const after = kanbanSetBody(before, 'y')
+  assert.equal(after.startsWith('---\nid: KAN-1\nblocked: "a \\"b\\" c"\n---\ny\n'), true)
+})
+
+test('kanbanSetBody returns null when the text has no frontmatter', () => {
+  assert.equal(kanbanSetBody('no fence', 'body'), null)
 })
 
 test('preview is empty when the body has no prose', () => {

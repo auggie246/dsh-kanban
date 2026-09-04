@@ -1,8 +1,13 @@
-// Client half of the kanban Plugin — M0 (issue #1, read-only Board).
+// Client half of the kanban Plugin — M0 (issue #2, editable Board).
 //
 // Registers two additive Slots: the Kanban button at the sidebar foot
 // (`sidebar.footer.action`) and the full-page Board (`shell.overlay`).
-// Plain JavaScript with React.createElement only: no imports, no JSX.
+// Plain JavaScript with React.createElement only: no imports, no JSX, no
+// window/document.
+//
+// Edits persist only through the Host JSON methods (ticket.create,
+// ticket.update, ticket.move); after every successful write the Board
+// re-reads the Ticket Files, so the files stay the single source of truth.
 
 return {
   apply(ctx) {
@@ -43,6 +48,11 @@ return {
       { key: 'done', label: 'Done' },
     ]
 
+    // Deliberate constant for issue #2: the Board tab landing in issue #3
+    // will replace it with a configured value. Dropping into In Progress
+    // above this many Tickets shows a warning but still allows the move.
+    const WIP_LIMIT = 3
+
     function BoardButton(owner) {
       return h(
         'button',
@@ -57,38 +67,230 @@ return {
     }
 
     function BoardCard(props) {
+      const card = props.card
       return h(
         'div',
-        { className: 'kanban-card' },
-        h('div', { className: 'kanban-card-head' }, h('span', { className: 'kanban-card-id' }, props.card.id)),
-        h('div', { className: 'kanban-card-title' }, props.card.title),
-        props.card.preview === ''
+        {
+          className: 'kanban-card',
+          draggable: true,
+          onClick: () => props.onEdit(card),
+          onDragStart: (event) => {
+            if (event.dataTransfer) event.dataTransfer.setData('text/plain', card.file)
+            props.onDragStart(card.file)
+          },
+          onDragEnd: props.onDragEnd,
+        },
+        h('div', { className: 'kanban-card-head' }, h('span', { className: 'kanban-card-id' }, card.id)),
+        h('div', { className: 'kanban-card-title' }, card.title),
+        card.preview === '' ? null : h('div', { className: 'kanban-card-preview' }, card.preview),
+        card.blocked === ''
           ? null
-          : h('div', { className: 'kanban-card-preview' }, props.card.preview),
+          : h('div', { className: 'kanban-card-blocked', title: card.blocked }, 'Blocked — ' + card.blocked),
       )
     }
 
     function BoardColumn(props) {
       return h(
         'section',
-        { className: 'kanban-column', key: props.column.key },
+        {
+          className: 'kanban-column' + (props.dragOver ? ' kanban-column-dragover' : ''),
+          key: props.column.key,
+          onDragOver: (event) => props.onDragOver(event, props.column.key),
+          onDragLeave: () => props.onDragLeave(props.column.key),
+          onDrop: (event) => props.onDrop(event, props.column.key),
+        },
         h(
           'div',
           { className: 'kanban-column-head' },
           h('span', { className: 'kanban-column-label' }, props.column.label),
-          h('span', { className: 'kanban-column-count' }, String(props.cards.length)),
+          h(
+            'span',
+            {
+              className: 'kanban-column-count',
+              title: props.column.key === 'in-progress' ? 'WIP limit ' + String(WIP_LIMIT) : undefined,
+            },
+            props.column.key === 'in-progress'
+              ? String(props.cards.length) + ' / ' + String(WIP_LIMIT)
+              : String(props.cards.length),
+          ),
         ),
         h(
           'div',
           { className: 'kanban-column-cards' },
-          props.cards.map((card) => h(BoardCard, { key: card.id, card })),
+          props.cards.map((card) =>
+            h(BoardCard, {
+              key: card.id,
+              card,
+              onEdit: props.onEditCard,
+              onDragStart: props.onDragStartCard,
+              onDragEnd: props.onDragEndCard,
+            }),
+          ),
+        ),
+      )
+    }
+
+    // Create/edit dialog for one Ticket. Edit mode pre-fills from the card;
+    // an empty Blocked field clears the badge. The file name is not renamed
+    // on title edits (the slug is fixed at creation).
+    function TicketDialog(props) {
+      const editing = props.mode === 'edit'
+      const [title, setTitle] = React.useState(editing ? props.card.title : '')
+      const [body, setBody] = React.useState(editing ? props.card.body : '')
+      const [blocked, setBlocked] = React.useState(editing ? props.card.blocked : '')
+      const [saving, setSaving] = React.useState(false)
+      const [error, setError] = React.useState(null)
+
+      const save = () => {
+        if (title.trim() === '') {
+          setError('Title is required.')
+          return
+        }
+        setSaving(true)
+        setError(null)
+        const method = editing ? 'ticket.update' : 'ticket.create'
+        const payload = { workspaceId: props.workspaceId, title: title.trim(), body }
+        if (editing) {
+          payload.file = props.card.file
+          payload.blocked = blocked.trim()
+        }
+        host.call(method, payload).then(
+          (reply) => {
+            setSaving(false)
+            if (reply && reply.ok) {
+              props.onSaved()
+            } else {
+              setError((reply && reply.error) || method + ' failed')
+            }
+          },
+          (err) => {
+            setSaving(false)
+            setError(String((err && err.message) || err))
+          },
+        )
+      }
+
+      return h(
+        'div',
+        {
+          className: 'kanban-dialog-backdrop',
+          onKeyDown: (event) => {
+            if (event.key === 'Escape') {
+              event.stopPropagation()
+              if (!saving) props.onCancel()
+            }
+          },
+        },
+        h(
+          'div',
+          { className: 'kanban-dialog' },
+          h('div', { className: 'kanban-dialog-title' }, editing ? 'Edit ' + props.card.id : 'New Ticket'),
+          h(
+            'label',
+            { className: 'kanban-field' },
+            h('span', { className: 'kanban-field-label' }, 'Title'),
+            h('input', {
+              className: 'kanban-input',
+              type: 'text',
+              value: title,
+              autoFocus: true,
+              onChange: (event) => setTitle(event.target.value),
+            }),
+          ),
+          h(
+            'label',
+            { className: 'kanban-field' },
+            h('span', { className: 'kanban-field-label' }, 'Body'),
+            h('textarea', {
+              className: 'kanban-textarea',
+              value: body,
+              placeholder: 'Goal, context, acceptance criteria — markdown.',
+              onChange: (event) => setBody(event.target.value),
+            }),
+          ),
+          editing
+            ? h(
+                'label',
+                { className: 'kanban-field' },
+                h('span', { className: 'kanban-field-label' }, 'Blocked reason (empty clears the badge)'),
+                h('input', {
+                  className: 'kanban-input',
+                  type: 'text',
+                  value: blocked,
+                  onChange: (event) => setBlocked(event.target.value),
+                }),
+              )
+            : null,
+          error === null ? null : h('div', { className: 'kanban-dialog-error' }, error),
+          h(
+            'div',
+            { className: 'kanban-dialog-actions' },
+            h(
+              'button',
+              { className: 'kanban-btn', type: 'button', disabled: saving, onClick: props.onCancel },
+              'Cancel',
+            ),
+            h(
+              'button',
+              { className: 'kanban-btn kanban-btn-primary', type: 'button', disabled: saving, onClick: save },
+              saving ? 'Saving…' : editing ? 'Save' : 'Create',
+            ),
+          ),
+        ),
+      )
+    }
+
+    // Warning shown when a drop into In Progress would pass the WIP limit.
+    // The move is still allowed — issue #2 asks for a warning, not a queue.
+    function WipWarning(props) {
+      return h(
+        'div',
+        {
+          className: 'kanban-dialog-backdrop',
+          onKeyDown: (event) => {
+            if (event.key === 'Escape') {
+              event.stopPropagation()
+              props.onCancel()
+            }
+          },
+        },
+        h(
+          'div',
+          { className: 'kanban-dialog' },
+          h('div', { className: 'kanban-dialog-title' }, 'WIP limit reached'),
+          h(
+            'div',
+            { className: 'kanban-dialog-text' },
+            'In Progress already holds ' +
+              String(props.count) +
+              ' Tickets (WIP limit ' +
+              String(WIP_LIMIT) +
+              '). Move anyway?',
+          ),
+          h(
+            'div',
+            { className: 'kanban-dialog-actions' },
+            h('button', { className: 'kanban-btn', type: 'button', onClick: props.onCancel }, 'Cancel'),
+            h(
+              'button',
+              { className: 'kanban-btn kanban-btn-primary', type: 'button', autoFocus: true, onClick: props.onConfirm },
+              'Move anyway',
+            ),
+          ),
         ),
       )
     }
 
     function BoardOverlay(props) {
       const open = useOpen()
+      const currentSessionId = props.useSessions((snapshot) => snapshot.current)
       const workspace = props.useWorkspaces((snapshot) => {
+        // The current Session decides the Board's Workspace. Recency is only
+        // the fallback for the New Session view, where no Session is current.
+        if (currentSessionId !== undefined) {
+          const currentWorkspace = snapshot.items.find((item) => item.sessionIds.includes(currentSessionId))
+          if (currentWorkspace !== undefined) return currentWorkspace
+        }
         const id = snapshot.recentWorkspaceId
         if (id === undefined) return undefined
         return snapshot.items.find((item) => item.workspaceId === id)
@@ -96,9 +298,17 @@ return {
       const [result, setResult] = React.useState(null)
       const [error, setError] = React.useState(null)
       const [loading, setLoading] = React.useState(false)
+      const [reloadToken, setReloadToken] = React.useState(0)
+      const [dialog, setDialog] = React.useState(null) // {mode:'create'} | {mode:'edit', card}
+      const [dragFile, setDragFile] = React.useState(null)
+      const [dragOverColumn, setDragOverColumn] = React.useState(null)
+      const [pendingMove, setPendingMove] = React.useState(null) // {file, column, count}
+      const [moveError, setMoveError] = React.useState(null)
       const workspaceId = workspace === undefined ? undefined : workspace.workspaceId
+      const reload = () => setReloadToken((token) => token + 1)
 
-      // Closing and re-opening re-reads the Ticket Files from the repo.
+      // Closing and re-opening re-reads the Ticket Files from the repo, and
+      // so does every successful write (via reload()).
       React.useEffect(() => {
         if (!open || workspaceId === undefined) return undefined
         let cancelled = false
@@ -125,11 +335,40 @@ return {
         return () => {
           cancelled = true
         }
-      }, [open, workspaceId])
+      }, [open, workspaceId, reloadToken])
 
       if (!open) return null
 
       const tickets = result === null ? [] : result.tickets
+
+      const doMove = (file, column) => {
+        setPendingMove(null)
+        setMoveError(null)
+        host.call('ticket.move', { workspaceId, file, column }).then(
+          (reply) => {
+            if (reply && reply.ok) {
+              reload()
+            } else {
+              setMoveError((reply && reply.error) || 'ticket.move failed')
+            }
+          },
+          (err) => setMoveError(String((err && err.message) || err)),
+        )
+      }
+
+      const requestMove = (file, column) => {
+        const card = tickets.find((ticket) => ticket.file === file)
+        if (card === undefined || card.column === column) return
+        if (column === 'in-progress') {
+          const count = tickets.filter((ticket) => ticket.column === 'in-progress').length
+          if (count >= WIP_LIMIT) {
+            setPendingMove({ file, column, count })
+            return
+          }
+        }
+        doMove(file, column)
+      }
+
       let body
       if (workspaceId === undefined) {
         body = h(
@@ -137,22 +376,10 @@ return {
           { className: 'kanban-state' },
           'No active Workspace. Select a Workspace to see its Board.',
         )
-      } else if (loading) {
+      } else if (loading && result === null) {
         body = h('div', { className: 'kanban-state' }, 'Reading Ticket Files…')
       } else if (error !== null) {
         body = h('div', { className: 'kanban-state kanban-state-error' }, 'Board unavailable: ' + error)
-      } else if (tickets.length === 0) {
-        body = h(
-          'div',
-          { className: 'kanban-state' },
-          h('div', { className: 'kanban-state-title' }, 'No Tickets yet'),
-          h(
-            'div',
-            { className: 'kanban-state-hint' },
-            'Tickets live as markdown Ticket Files in .dsh-kanban/tickets/ inside this Workspace. ' +
-              'Write one with frontmatter (id, title, column) and reopen the Board to see your first Ticket.',
-          ),
-        )
       } else {
         body = h(
           'div',
@@ -162,9 +389,46 @@ return {
               key: column.key,
               column,
               cards: tickets.filter((ticket) => ticket.column === column.key),
+              dragOver: dragOverColumn === column.key,
+              onEditCard: (card) => setDialog({ mode: 'edit', card }),
+              onDragStartCard: (file) => setDragFile(file),
+              onDragEndCard: () => {
+                setDragFile(null)
+                setDragOverColumn(null)
+              },
+              onDragOver: (event, key) => {
+                if (dragFile === null) return
+                event.preventDefault()
+                if (dragOverColumn !== key) setDragOverColumn(key)
+              },
+              onDragLeave: (key) => {
+                if (dragOverColumn === key) setDragOverColumn(null)
+              },
+              onDrop: (event, key) => {
+                event.preventDefault()
+                const file = dragFile
+                setDragFile(null)
+                setDragOverColumn(null)
+                if (file !== null) requestMove(file, key)
+              },
             }),
           ),
         )
+        if (tickets.length === 0 && !loading) {
+          body = h(
+            'div',
+            { className: 'kanban-state' },
+            h('div', { className: 'kanban-state-title' }, 'No Tickets yet'),
+            h(
+              'div',
+              { className: 'kanban-state-hint' },
+              'Use New Ticket above to write your first Ticket File into .dsh-kanban/tickets/.',
+            ),
+          )
+        }
+        if (moveError !== null) {
+          body = h(React.Fragment, null, body, h('div', { className: 'kanban-move-error' }, 'Move failed: ' + moveError))
+        }
       }
 
       return h(
@@ -186,6 +450,18 @@ return {
           workspace === undefined
             ? null
             : h('span', { className: 'kanban-board-workspace' }, workspace.title + ' — ' + workspace.path),
+          workspaceId === undefined
+            ? null
+            : h(
+                'button',
+                {
+                  className: 'kanban-new-btn',
+                  type: 'button',
+                  onClick: () => setDialog({ mode: 'create' }),
+                  title: 'Create a Ticket in the Backlog',
+                },
+                '+ New Ticket',
+              ),
           h(
             'button',
             {
@@ -198,6 +474,25 @@ return {
           ),
         ),
         body,
+        dialog === null
+          ? null
+          : h(TicketDialog, {
+              mode: dialog.mode,
+              card: dialog.card,
+              workspaceId,
+              onCancel: () => setDialog(null),
+              onSaved: () => {
+                setDialog(null)
+                reload()
+              },
+            }),
+        pendingMove === null
+          ? null
+          : h(WipWarning, {
+              count: pendingMove.count,
+              onCancel: () => setPendingMove(null),
+              onConfirm: () => doMove(pendingMove.file, pendingMove.column),
+            }),
       )
     }
 
@@ -239,12 +534,14 @@ return {
       '.kanban-board-name{font-size:15px;font-weight:600;}',
       '.kanban-board-workspace{flex:1;font-size:12px;color:var(--dsw-alias-label-secondary);',
       'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-      '.kanban-close{padding:4px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;',
+      '.kanban-close,.kanban-new-btn{padding:4px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;',
       'background:transparent;color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer;}',
-      '.kanban-close:hover{background:var(--dsw-alias-bg-layer-1);}',
+      '.kanban-close:hover,.kanban-new-btn:hover{background:var(--dsw-alias-bg-layer-1);}',
+      '.kanban-new-btn{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);}',
       '.kanban-columns{flex:1;display:flex;gap:12px;padding:16px 20px;overflow-x:auto;}',
       '.kanban-column{flex:1 1 0;min-width:220px;display:flex;flex-direction:column;',
       'background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;}',
+      '.kanban-column-dragover{border-color:var(--dsw-alias-brand-primary);}',
       '.kanban-column-head{display:flex;align-items:center;justify-content:space-between;',
       'padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);}',
       '.kanban-column-label{font-size:12px;font-weight:600;text-transform:uppercase;',
@@ -253,17 +550,42 @@ return {
       'background:var(--dsw-alias-bg-layer-2);border-radius:10px;padding:1px 8px;}',
       '.kanban-column-cards{flex:1;display:flex;flex-direction:column;gap:8px;padding:10px;overflow-y:auto;}',
       '.kanban-card{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);',
-      'border-radius:6px;padding:10px;}',
+      'border-radius:6px;padding:10px;cursor:grab;}',
       '.kanban-card-head{margin-bottom:4px;}',
       '.kanban-card-id{font-size:11px;font-weight:600;color:var(--dsw-alias-brand-primary);}',
       '.kanban-card-title{font-size:13px;font-weight:500;margin-bottom:4px;}',
       '.kanban-card-preview{font-size:12px;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-card-blocked{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
+      'color:var(--dsw-alias-state-error-primary);border:1px solid var(--dsw-alias-state-error-primary);',
+      'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
       '.kanban-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;',
       'gap:8px;padding:40px;text-align:center;}',
       '.kanban-state-title{font-size:15px;font-weight:600;}',
       '.kanban-state-hint{max-width:420px;font-size:13px;color:var(--dsw-alias-label-secondary);}',
       '.kanban-state-error{color:var(--dsw-alias-state-error-primary);',
       'font-size:13px;white-space:pre-wrap;}',
+      '.kanban-move-error{position:absolute;right:20px;bottom:16px;padding:6px 12px;font-size:12px;',
+      'color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-bg-layer-1);',
+      'border:1px solid var(--dsw-alias-state-error-primary);border-radius:6px;}',
+      '.kanban-dialog-backdrop{position:fixed;inset:0;z-index:100;display:flex;align-items:center;',
+      'justify-content:center;background:rgba(0,0,0,.4);pointer-events:auto;}',
+      '.kanban-dialog{width:560px;max-width:90vw;max-height:80vh;display:flex;flex-direction:column;gap:12px;',
+      'padding:18px;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);',
+      'border-radius:10px;overflow-y:auto;}',
+      '.kanban-dialog-title{font-size:15px;font-weight:600;}',
+      '.kanban-dialog-text{font-size:13px;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-dialog-error{font-size:12px;color:var(--dsw-alias-state-error-primary);white-space:pre-wrap;}',
+      '.kanban-field{display:flex;flex-direction:column;gap:4px;}',
+      '.kanban-field-label{font-size:12px;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-input,.kanban-textarea{padding:6px 8px;font-size:13px;font-family:inherit;',
+      'color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);',
+      'border:1px solid var(--dsw-alias-border-l1);border-radius:6px;}',
+      '.kanban-textarea{height:160px;resize:vertical;}',
+      '.kanban-dialog-actions{display:flex;justify-content:flex-end;gap:8px;}',
+      '.kanban-btn{padding:4px 12px;font-size:12px;border:1px solid var(--dsw-alias-border-l1);',
+      'border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);cursor:pointer;}',
+      '.kanban-btn:disabled{opacity:.5;cursor:default;}',
+      '.kanban-btn-primary{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);}',
     ].join('\n'))
   },
 }

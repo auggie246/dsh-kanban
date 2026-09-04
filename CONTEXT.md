@@ -50,8 +50,10 @@ Ticket to Ready is the user's refinement act.
 ### In Progress
 
 Exactly one Agent Session owns this Ticket, working in that Ticket's
-Worktree. The column carries a configurable WIP limit (default 2); dragging
-past the limit queues the Ticket until a slot frees.
+Worktree. The column carries a configurable WIP limit (default 3, a constant
+until issue #3 ships the settings surface); dragging past the limit queues
+the Ticket until a slot frees. Until the queue lands (issue #5), the Board
+warns and allows the move.
 
 ### In Review
 
@@ -159,15 +161,23 @@ agent never self-certifies its own work order.
 ### Ticket File
 
 The on-disk form of a Ticket: one markdown file per Ticket at
-`.dsh-kanban/tickets/<id>-<slug>.md`, with frontmatter for state and the
-body as the description. The Board renders by scanning the directory; Agent
-Sessions read and edit Ticket Files with plain file tools.
+`.dsh-kanban/tickets/KAN-<n>-<slug>.md`, with frontmatter for state and the
+body as the description. New ids never go below `KAN-101`, which keeps them
+visually distinct from Issue numbers. The slug uses lowercase alphanumerics
+and dashes, with a 40-character limit and `ticket` fallback. The Board renders
+by scanning the directory; Agent Sessions read and edit Ticket Files with
+plain file tools.
 
 Frontmatter keys: `id` (KAN-<n>), `title`, `column` (one of `backlog`,
-`ready`, `in-progress`, `in-review`, `done` — kebab-case), `issue` (Issue
-URL, empty when none), `branch`, `worktree`, `session` (Agent Session id).
-Values are scalars on one line; multi-line YAML is not used. The parser
-lives in `plugin/frontmatter.js` and is the tested seam for the format.
+`ready`, `in-progress`, `in-review`, `done` — kebab-case), `blocked`
+(free-text reason, shown as a Blocked badge in any column; empty/absent
+means not Blocked), `issue` (Issue URL, empty when none), `branch`,
+`worktree`, `session` (Agent Session id). Values are scalars on one line;
+multi-line YAML is not used. Scalars containing `:`, `#`, quotes or
+backslashes are double-quoted with `\"` and `\\` escapes. The
+`<id>-<slug>` file name is fixed at creation: editing the title does not
+rename the file. The parser and serializer live in `plugin/frontmatter.js`
+and are the tested seam for the format.
 
 ## Execution concepts
 
