@@ -1,10 +1,8 @@
-// Host half of the kanban Plugin — M0 (issue #2, editable Board).
+// Host half of the kanban Plugin — M0 (issue #3, Board tabs and settings).
 //
-// `cordis_define` receives plugin/frontmatter.js concatenated in front of
-// this file, so parseTicketFile, kanbanSlug, kanbanNextId,
-// serializeTicketFile, kanbanSetAttr, kanbanSetBody and KANBAN_COLUMNS are
-// already in scope below. Plain JavaScript only: no imports, no TypeScript,
-// no Node globals.
+// `cordis_define` receives plugin/frontmatter.js and plugin/settings.js
+// concatenated before this file. Their pure helpers are already in scope.
+// Plain JavaScript only: no imports, no TypeScript, and no Node globals.
 //
 // Write behaviour: every Ticket File write goes through the fs service's
 // writeText, which stages the content in a private temp file and publishes
@@ -14,11 +12,95 @@
 // is never overwritten.
 
 return {
-  apply(ctx) {
-    const registry = ctx.get('workspaceRegistry')
-    const fs = ctx.get('fs')
+  inject: ['workspaceRegistry', 'fs', 'storageDomain'],
+  async apply(ctx) {
+    const registry = ctx.workspaceRegistry
+    const fs = ctx.fs
+    const storageDomain = ctx.storageDomain
 
-    const unavailable = () => ({ ok: false, error: 'host services unavailable' })
+    const domain = await storageDomain.open({
+      name: 'kanban_settings',
+      version: 1,
+      tables: { workspaces: { valueSchema: kanbanSettingsRecordSchema } },
+    })
+    const settingsTable = domain.table('workspaces')
+    let settingsAdmissionOpen = true
+    let settingsTail = Promise.resolve()
+
+    const enqueueSettings = (operation) => {
+      if (!settingsAdmissionOpen) return Promise.reject(new Error('Board settings are stopping'))
+      const result = settingsTail.then(operation)
+      settingsTail = result.then(
+        () => undefined,
+        () => undefined,
+      )
+      return result
+    }
+
+    ctx.effect(
+      () => async () => {
+        settingsAdmissionOpen = false
+        await settingsTail
+        await domain.close()
+      },
+      'kanban.settingsDomainClose',
+    )
+
+    const settingsView = (workspace, settings) => ({
+      workspaceId: String(workspace.id),
+      title: workspace.title,
+      path: settings.path,
+      wipLimit: settings.wipLimit,
+    })
+
+    const persistWorkspaceSettings = async (workspaceId, settings) => {
+      const current = settingsTable.get(workspaceId)
+      if (
+        current === undefined ||
+        current.path !== settings.path ||
+        current.wipLimit !== settings.wipLimit
+      ) {
+        await settingsTable.put(workspaceId, settings)
+      }
+      return settings
+    }
+
+    const ensureWorkspaceSettings = async (workspace) => {
+      const entry = kanbanWorkspaceSettingEntries(
+        [workspace],
+        (workspaceId) => settingsTable.get(workspaceId),
+      )[0]
+      return persistWorkspaceSettings(entry.workspaceId, entry.settings)
+    }
+
+    const syncWorkspaceSettings = async () => {
+      const workspaces = registry.list()
+      const entries = kanbanWorkspaceSettingEntries(
+        workspaces,
+        (workspaceId) => settingsTable.get(workspaceId),
+      )
+      const liveIds = new Set(entries.map((entry) => entry.workspaceId))
+      const result = []
+      for (let index = 0; index < entries.length; index += 1) {
+        const entry = entries[index]
+        const settings = await persistWorkspaceSettings(entry.workspaceId, entry.settings)
+        result.push(settingsView(workspaces[index], settings))
+      }
+      for (const workspaceId of settingsTable.keys()) {
+        if (!liveIds.has(String(workspaceId))) await settingsTable.delete(workspaceId)
+      }
+      return result
+    }
+
+    ctx.on('domain/changed', (change) => {
+      if (change.domain !== 'workspace' || change.table !== 'workspaces' || !settingsAdmissionOpen) return
+      void enqueueSettings(syncWorkspaceSettings).catch((err) => {
+        console.error('kanban settings sync failed: ' + String((err && err.message) || err))
+      })
+    })
+
+    // Materialize the UUID-to-path mapping for every registered Workspace.
+    await enqueueSettings(syncWorkspaceSettings)
 
     // Only real Ticket File names are ever resolved for read/write; this
     // stops path traversal through crafted `file` arguments.
@@ -52,14 +134,20 @@ return {
     // which saves a second round trip per opened Ticket.
     ctx.effect(() =>
       harness.handle('board.list', async (args) => {
-        if (registry === undefined || fs === undefined) return unavailable()
         const workspaceLookup = workspaceOf(args)
         if (workspaceLookup.workspace === undefined) return { ok: false, error: workspaceLookup.error }
         try {
+          const boardSettings = await enqueueSettings(() => ensureWorkspaceSettings(workspaceLookup.workspace))
           const dir = await fs.resolve(ticketsDir(workspaceLookup.workspace))
           const info = await fs.stat(dir)
           if (info === undefined || info.type !== 'directory') {
-            return { ok: true, workspaceId: workspaceLookup.workspaceId, workspaceTitle: workspaceLookup.workspace.title, tickets: [] }
+            return {
+              ok: true,
+              workspaceId: workspaceLookup.workspaceId,
+              workspaceTitle: workspaceLookup.workspace.title,
+              wipLimit: boardSettings.wipLimit,
+              tickets: [],
+            }
           }
           const entries = await fs.listDir(dir)
           const tickets = []
@@ -73,9 +161,50 @@ return {
               console.error('board.list: skipping unreadable Ticket File ' + entry.name + ': ' + String((err && err.message) || err))
             }
           }
-          return { ok: true, workspaceId: workspaceLookup.workspaceId, workspaceTitle: workspaceLookup.workspace.title, tickets }
+          return {
+            ok: true,
+            workspaceId: workspaceLookup.workspaceId,
+            workspaceTitle: workspaceLookup.workspace.title,
+            wipLimit: boardSettings.wipLimit,
+            tickets,
+          }
         } catch (err) {
           return { ok: false, error: 'board-read-failed: ' + String((err && err.message) || err) }
+        }
+      }),
+    )
+
+    // board.settings.list() → one durable settings record per registered
+    // Workspace. Calling it also repairs any stale UUID-to-path mapping.
+    ctx.effect(() =>
+      harness.handle('board.settings.list', async () => {
+        try {
+          return { ok: true, workspaces: await enqueueSettings(syncWorkspaceSettings) }
+        } catch (err) {
+          return { ok: false, error: 'settings-read-failed: ' + String((err && err.message) || err) }
+        }
+      }),
+    )
+
+    // board.settings.update({ workspaceId, wipLimit }) → the committed record.
+    ctx.effect(() =>
+      harness.handle('board.settings.update', async (args) => {
+        const workspaceId = args && typeof args.workspaceId === 'string' ? args.workspaceId : ''
+        if (workspaceId === '') return { ok: false, error: 'workspaceId required' }
+        const wipLimit = kanbanParseWipLimit(args && args.wipLimit)
+        if (wipLimit === null) return { ok: false, error: 'wipLimit must be a positive whole number' }
+        try {
+          const view = await enqueueSettings(async () => {
+            const workspace = registry.get(workspaceId)
+            if (workspace === undefined) return undefined
+            const settings = { path: workspace.path, wipLimit }
+            await settingsTable.put(workspaceId, settings)
+            return settingsView(workspace, settings)
+          })
+          if (view === undefined) return { ok: false, error: 'workspace-not-found' }
+          return { ok: true, ...view }
+        } catch (err) {
+          return { ok: false, error: 'settings-write-failed: ' + String((err && err.message) || err) }
         }
       }),
     )
@@ -85,7 +214,6 @@ return {
     // (KAN-101 when the Board is empty); the file name is <id>-<slug>.md.
     ctx.effect(() =>
       harness.handle('ticket.create', async (args) => {
-        if (registry === undefined || fs === undefined) return unavailable()
         const workspaceLookup = workspaceOf(args)
         if (workspaceLookup.workspace === undefined) return { ok: false, error: workspaceLookup.error }
         const title = String((args && args.title) || '').trim()
@@ -121,7 +249,6 @@ return {
     // stays byte-identical. An empty blocked value clears the badge.
     ctx.effect(() =>
       harness.handle('ticket.update', async (args) => {
-        if (registry === undefined || fs === undefined) return unavailable()
         const workspaceLookup = workspaceOf(args)
         if (workspaceLookup.workspace === undefined) return { ok: false, error: workspaceLookup.error }
         const title = String((args && args.title) || '').trim()
@@ -147,7 +274,6 @@ return {
     // frontmatter field; body and every other key stay byte-identical.
     ctx.effect(() =>
       harness.handle('ticket.move', async (args) => {
-        if (registry === undefined || fs === undefined) return unavailable()
         const workspaceLookup = workspaceOf(args)
         if (workspaceLookup.workspace === undefined) return { ok: false, error: workspaceLookup.error }
         const column = String((args && args.column) || '').trim().toLowerCase()

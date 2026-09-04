@@ -1,13 +1,12 @@
-// Client half of the kanban Plugin — M0 (issue #2, editable Board).
+// Client half of the kanban Plugin — M0 (issue #3, Board tabs and settings).
 //
-// Registers two additive Slots: the Kanban button at the sidebar foot
-// (`sidebar.footer.action`) and the full-page Board (`shell.overlay`).
+// Registers four additive Slots: sidebar button, full-page Board overlay,
+// per-session Board tab, and per-Workspace Board settings.
 // Plain JavaScript with React.createElement only: no imports, no JSX, no
 // window/document.
 //
-// Edits persist only through the Host JSON methods (ticket.create,
-// ticket.update, ticket.move); after every successful write the Board
-// re-reads the Ticket Files, so the files stay the single source of truth.
+// Ticket edits and Board settings persist only through Host JSON methods.
+// After each successful write, every mounted Board reloads its Workspace.
 
 return {
   apply(ctx) {
@@ -16,28 +15,25 @@ return {
 
     const h = React.createElement
 
-    // The two Slots are separate registrations; this tiny store is the
-    // shared open/closed state between the button and the overlay.
-    const openState = { open: false, listeners: new Set() }
-    const notifyOpen = () => {
-      for (const listener of Array.from(openState.listeners)) listener()
-    }
-    const setOpen = (next) => {
-      if (openState.open === next) return
-      openState.open = next
-      notifyOpen()
-    }
-    const useOpen = () => {
-      const [value, setValue] = React.useState(openState.open)
+    const useStoreValue = (store) => {
+      const [value, setValue] = React.useState(store.value)
       React.useEffect(() => {
-        const listener = () => setValue(openState.open)
-        openState.listeners.add(listener)
-        return () => {
-          openState.listeners.delete(listener)
-        }
-      }, [])
+        const listener = () => setValue(store.value)
+        store.listeners.add(listener)
+        return () => store.listeners.delete(listener)
+      }, [store])
       return value
     }
+    const publishStoreValue = (store, next) => {
+      if (store.value === next) return
+      store.value = next
+      for (const listener of Array.from(store.listeners)) listener()
+    }
+
+    // Shared open state connects the sidebar button to the overlay Slot.
+    const openState = { value: false, listeners: new Set() }
+    const setOpen = (next) => publishStoreValue(openState, next)
+    const useOpen = () => useStoreValue(openState)
 
     // Mirror of KANBAN_COLUMNS in plugin/frontmatter.js — keep in lockstep.
     const COLUMNS = [
@@ -48,10 +44,11 @@ return {
       { key: 'done', label: 'Done' },
     ]
 
-    // Deliberate constant for issue #2: the Board tab landing in issue #3
-    // will replace it with a configured value. Dropping into In Progress
-    // above this many Tickets shows a warning but still allows the move.
-    const WIP_LIMIT = 3
+    // Every mounted Board reads Ticket Files and settings again after any
+    // surface commits a change. This keeps overlay and tab views aligned.
+    const boardChanges = { value: 0, listeners: new Set() }
+    const notifyBoardChange = () => publishStoreValue(boardChanges, boardChanges.value + 1)
+    const useBoardVersion = () => useStoreValue(boardChanges)
 
     function BoardButton(owner) {
       return h(
@@ -107,10 +104,10 @@ return {
             'span',
             {
               className: 'kanban-column-count',
-              title: props.column.key === 'in-progress' ? 'WIP limit ' + String(WIP_LIMIT) : undefined,
+              title: props.column.key === 'in-progress' ? 'WIP limit ' + String(props.wipLimit) : undefined,
             },
             props.column.key === 'in-progress'
-              ? String(props.cards.length) + ' / ' + String(WIP_LIMIT)
+              ? String(props.cards.length) + ' / ' + String(props.wipLimit)
               : String(props.cards.length),
           ),
         ),
@@ -264,7 +261,7 @@ return {
             'In Progress already holds ' +
               String(props.count) +
               ' Tickets (WIP limit ' +
-              String(WIP_LIMIT) +
+              String(props.wipLimit) +
               '). Move anyway?',
           ),
           h(
@@ -281,37 +278,23 @@ return {
       )
     }
 
-    function BoardOverlay(props) {
-      const open = useOpen()
-      const currentSessionId = props.useSessions((snapshot) => snapshot.current)
-      const workspace = props.useWorkspaces((snapshot) => {
-        // The current Session decides the Board's Workspace. Recency is only
-        // the fallback for the New Session view, where no Session is current.
-        if (currentSessionId !== undefined) {
-          const currentWorkspace = snapshot.items.find((item) => item.sessionIds.includes(currentSessionId))
-          if (currentWorkspace !== undefined) return currentWorkspace
-        }
-        const id = snapshot.recentWorkspaceId
-        if (id === undefined) return undefined
-        return snapshot.items.find((item) => item.workspaceId === id)
-      })
+    function Board(props) {
+      const workspace = props.workspace
       const [result, setResult] = React.useState(null)
       const [error, setError] = React.useState(null)
       const [loading, setLoading] = React.useState(false)
-      const [reloadToken, setReloadToken] = React.useState(0)
       const [dialog, setDialog] = React.useState(null) // {mode:'create'} | {mode:'edit', card}
       const [dragFile, setDragFile] = React.useState(null)
       const [dragOverColumn, setDragOverColumn] = React.useState(null)
       const [pendingMove, setPendingMove] = React.useState(null) // {file, column, count}
       const [moveError, setMoveError] = React.useState(null)
+      const boardVersion = useBoardVersion()
       const workspaceId = workspace === undefined ? undefined : workspace.workspaceId
-      const reload = () => setReloadToken((token) => token + 1)
 
-      // Closing and re-opening re-reads the Ticket Files from the repo, and
-      // so does every successful write (via reload()).
       React.useEffect(() => {
-        if (!open || workspaceId === undefined) return undefined
+        if (workspaceId === undefined) return undefined
         let cancelled = false
+        setResult(null)
         setLoading(true)
         setError(null)
         host.call('board.list', { workspaceId }).then(
@@ -335,11 +318,10 @@ return {
         return () => {
           cancelled = true
         }
-      }, [open, workspaceId, reloadToken])
-
-      if (!open) return null
+      }, [workspaceId, boardVersion])
 
       const tickets = result === null ? [] : result.tickets
+      const wipLimit = result === null ? null : result.wipLimit
 
       const doMove = (file, column) => {
         setPendingMove(null)
@@ -347,7 +329,7 @@ return {
         host.call('ticket.move', { workspaceId, file, column }).then(
           (reply) => {
             if (reply && reply.ok) {
-              reload()
+              notifyBoardChange()
             } else {
               setMoveError((reply && reply.error) || 'ticket.move failed')
             }
@@ -361,7 +343,7 @@ return {
         if (card === undefined || card.column === column) return
         if (column === 'in-progress') {
           const count = tickets.filter((ticket) => ticket.column === 'in-progress').length
-          if (count >= WIP_LIMIT) {
+          if (count >= wipLimit) {
             setPendingMove({ file, column, count })
             return
           }
@@ -376,7 +358,7 @@ return {
           { className: 'kanban-state' },
           'No active Workspace. Select a Workspace to see its Board.',
         )
-      } else if (loading && result === null) {
+      } else if (result === null) {
         body = h('div', { className: 'kanban-state' }, 'Reading Ticket Files…')
       } else if (error !== null) {
         body = h('div', { className: 'kanban-state kanban-state-error' }, 'Board unavailable: ' + error)
@@ -390,6 +372,7 @@ return {
               column,
               cards: tickets.filter((ticket) => ticket.column === column.key),
               dragOver: dragOverColumn === column.key,
+              wipLimit,
               onEditCard: (card) => setDialog({ mode: 'edit', card }),
               onDragStartCard: (file) => setDragFile(file),
               onDragEndCard: () => {
@@ -435,13 +418,13 @@ return {
         'div',
         {
           className: 'kanban-board',
-          tabIndex: -1,
-          ref: (el) => {
-            if (el) el.focus()
-          },
-          onKeyDown: (event) => {
-            if (event.key === 'Escape') setOpen(false)
-          },
+          tabIndex: props.onClose === undefined ? undefined : -1,
+          autoFocus: props.onClose !== undefined,
+          onKeyDown: props.onClose === undefined
+            ? undefined
+            : (event) => {
+                if (event.key === 'Escape') props.onClose()
+              },
         },
         h(
           'header',
@@ -462,16 +445,18 @@ return {
                 },
                 '+ New Ticket',
               ),
-          h(
-            'button',
-            {
-              className: 'kanban-close',
-              type: 'button',
-              onClick: () => setOpen(false),
-              title: 'Close the Board (Esc)',
-            },
-            'Close',
-          ),
+          props.onClose === undefined
+            ? null
+            : h(
+                'button',
+                {
+                  className: 'kanban-close',
+                  type: 'button',
+                  onClick: props.onClose,
+                  title: 'Close the Board (Esc)',
+                },
+                'Close',
+              ),
         ),
         body,
         dialog === null
@@ -483,16 +468,179 @@ return {
               onCancel: () => setDialog(null),
               onSaved: () => {
                 setDialog(null)
-                reload()
+                notifyBoardChange()
               },
             }),
         pendingMove === null
           ? null
           : h(WipWarning, {
               count: pendingMove.count,
+              wipLimit,
               onCancel: () => setPendingMove(null),
               onConfirm: () => doMove(pendingMove.file, pendingMove.column),
             }),
+      )
+    }
+
+    function BoardOverlay(props) {
+      const open = useOpen()
+      const currentSessionId = props.useSessions((snapshot) => snapshot.current)
+      const workspace = props.useWorkspaces((snapshot) => {
+        if (currentSessionId !== undefined) {
+          const currentWorkspace = snapshot.items.find((item) => item.sessionIds.includes(currentSessionId))
+          if (currentWorkspace !== undefined) return currentWorkspace
+        }
+        const id = snapshot.recentWorkspaceId
+        if (id === undefined) return undefined
+        return snapshot.items.find((item) => item.workspaceId === id)
+      })
+      if (!open) return null
+      const workspaceId = workspace === undefined ? 'none' : workspace.workspaceId
+      return h(
+        'div',
+        { className: 'kanban-board-overlay' },
+        h(Board, { key: workspaceId, workspace, onClose: () => setOpen(false) }),
+      )
+    }
+
+    function ConversationBoard(props) {
+      const workspace = props.useWorkspaces((snapshot) =>
+        snapshot.items.find((item) => item.sessionIds.includes(props.sessionId)),
+      )
+      const workspaceId = workspace === undefined ? 'none' : workspace.workspaceId
+      return h(
+        'div',
+        { className: 'kanban-board-embedded' },
+        h(Board, { key: workspaceId, workspace }),
+      )
+    }
+
+    function BoardSettings(props) {
+      const workspaces = props.useWorkspaces((snapshot) => snapshot.items)
+      const workspaceKey = workspaces
+        .map((workspace) => workspace.workspaceId + ':' + workspace.title + ':' + workspace.path)
+        .join('|')
+      const boardVersion = useBoardVersion()
+      const [rows, setRows] = React.useState(null)
+      const [error, setError] = React.useState(null)
+      const [savingId, setSavingId] = React.useState(null)
+      const [savedId, setSavedId] = React.useState(null)
+
+      React.useEffect(() => {
+        let cancelled = false
+        setError(null)
+        host.call('board.settings.list', {}).then(
+          (reply) => {
+            if (cancelled) return
+            if (reply && reply.ok) {
+              setRows(reply.workspaces)
+            } else {
+              setRows(null)
+              setError((reply && reply.error) || 'board.settings.list failed')
+            }
+          },
+          (err) => {
+            if (cancelled) return
+            setRows(null)
+            setError(String((err && err.message) || err))
+          },
+        )
+        return () => {
+          cancelled = true
+        }
+      }, [workspaceKey, boardVersion])
+
+      const updateDraft = (workspaceId, value) => {
+        setSavedId(null)
+        setRows((current) =>
+          current.map((row) => (row.workspaceId === workspaceId ? { ...row, wipLimit: value } : row)),
+        )
+      }
+
+      const save = (row) => {
+        setSavingId(row.workspaceId)
+        setSavedId(null)
+        setError(null)
+        host.call('board.settings.update', {
+          workspaceId: row.workspaceId,
+          wipLimit: row.wipLimit,
+        }).then(
+          (reply) => {
+            setSavingId(null)
+            if (reply && reply.ok) {
+              setSavedId(row.workspaceId)
+              notifyBoardChange()
+            } else {
+              setError((reply && reply.error) || 'board.settings.update failed')
+            }
+          },
+          (err) => {
+            setSavingId(null)
+            setError(String((err && err.message) || err))
+          },
+        )
+      }
+
+      let content
+      if (rows === null && error === null) {
+        content = h('div', { className: 'kanban-settings-state' }, 'Loading Workspace settings…')
+      } else if (rows === null) {
+        content = null
+      } else if (rows.length === 0) {
+        content = h('div', { className: 'kanban-settings-state' }, 'No registered Workspaces.')
+      } else {
+        content = h(
+          'div',
+          { className: 'kanban-settings-list' },
+          rows.map((row) =>
+            h(
+              'div',
+              { className: 'kanban-settings-row', key: row.workspaceId },
+              h(
+                'div',
+                { className: 'kanban-settings-workspace' },
+                h('div', { className: 'kanban-settings-title' }, row.title),
+                h('div', { className: 'kanban-settings-path' }, row.path),
+              ),
+              h(
+                'label',
+                { className: 'kanban-settings-limit' },
+                h('span', null, 'In Progress WIP limit'),
+                h('input', {
+                  className: 'kanban-input kanban-settings-input',
+                  type: 'number',
+                  min: 1,
+                  step: 1,
+                  value: row.wipLimit,
+                  onChange: (event) => updateDraft(row.workspaceId, event.target.value),
+                }),
+              ),
+              h(
+                'button',
+                {
+                  className: 'kanban-btn kanban-btn-primary',
+                  type: 'button',
+                  disabled: savingId !== null,
+                  onClick: () => save(row),
+                },
+                savingId === row.workspaceId ? 'Saving…' : savedId === row.workspaceId ? 'Saved' : 'Save',
+              ),
+            ),
+          ),
+        )
+      }
+
+      return h(
+        'div',
+        { className: 'kanban-settings' },
+        h('h2', { className: 'kanban-settings-heading' }, 'Kanban'),
+        h(
+          'p',
+          { className: 'kanban-settings-description' },
+          'Each Workspace keeps its own In Progress WIP limit.',
+        ),
+        error === null ? null : h('div', { className: 'kanban-dialog-error' }, error),
+        content,
       )
     }
 
@@ -506,6 +654,18 @@ return {
       slots.register(
         { name: 'shell.overlay', id: 'kanban-board', order: 10, label: 'Kanban Board' },
         (slotProps) => h(BoardOverlay, slotProps),
+      ),
+    )
+    slots.inject('conversation.view', () =>
+      slots.register(
+        { name: 'conversation.view', id: 'kanban-board', order: 20, label: 'Board' },
+        (slotProps) => h(ConversationBoard, slotProps),
+      ),
+    )
+    slots.inject('settings.section', () =>
+      slots.register(
+        { name: 'settings.section', id: 'kanban-settings', order: 30, label: 'Kanban' },
+        (slotProps) => h(BoardSettings, slotProps),
       ),
     )
 
@@ -526,9 +686,10 @@ return {
       // horizontal row — degradation is visual only.
       '.hHd-Xa_footerActions{flex-direction:column;align-items:stretch;gap:6px;}',
       '.hHd-Xa_collapsed .hHd-Xa_footerActions{align-items:center;}',
-      '.kanban-board{position:fixed;inset:0;z-index:90;display:flex;flex-direction:column;',
-      'background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);',
-      'pointer-events:auto;outline:none;}',
+      '.kanban-board-overlay{position:fixed;inset:0;z-index:90;display:flex;pointer-events:auto;}',
+      '.kanban-board-embedded{height:100%;min-height:0;display:flex;}',
+      '.kanban-board{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;',
+      'background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);outline:none;}',
       '.kanban-board-header{display:flex;align-items:center;gap:12px;padding:12px 20px;',
       'border-bottom:1px solid var(--dsw-alias-border-l1);}',
       '.kanban-board-name{font-size:15px;font-weight:600;}',
@@ -586,6 +747,18 @@ return {
       'border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);cursor:pointer;}',
       '.kanban-btn:disabled{opacity:.5;cursor:default;}',
       '.kanban-btn-primary{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);}',
+      '.kanban-settings{display:flex;flex-direction:column;gap:12px;padding:4px 0 24px;}',
+      '.kanban-settings-heading{margin:0;font-size:18px;}',
+      '.kanban-settings-description,.kanban-settings-state{margin:0;font-size:13px;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-settings-list{display:flex;flex-direction:column;gap:8px;}',
+      '.kanban-settings-row{display:flex;align-items:center;gap:16px;padding:12px;',
+      'border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);}',
+      '.kanban-settings-workspace{flex:1;min-width:0;}',
+      '.kanban-settings-title{font-size:13px;font-weight:600;}',
+      '.kanban-settings-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
+      'font-size:11px;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-settings-limit{display:flex;align-items:center;gap:8px;font-size:12px;}',
+      '.kanban-settings-input{width:72px;}',
     ].join('\n'))
   },
 }

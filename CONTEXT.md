@@ -15,7 +15,8 @@ The board is scoped to exactly one Workspace — there is no cross-workspace boa
 
 The kanban board of one Workspace. A full-page view shown over the whole DSH
 GUI, opened from a Kanban button at the sidebar foot (with a per-session
-Board tab as a shortcut). Its state persists inside the Workspace repository.
+Board tab as a shortcut). Ticket state persists inside the Workspace
+repository. Per-Workspace Board configuration persists separately in DSH.
 The Board is the orchestration surface: it starts, watches, and review-gates
 Agent Sessions.
 
@@ -50,10 +51,10 @@ Ticket to Ready is the user's refinement act.
 ### In Progress
 
 Exactly one Agent Session owns this Ticket, working in that Ticket's
-Worktree. The column carries a configurable WIP limit (default 3, a constant
-until issue #3 ships the settings surface); dragging past the limit queues
-the Ticket until a slot frees. Until the queue lands (issue #5), the Board
-warns and allows the move.
+Worktree. The column carries a per-Workspace WIP limit, which defaults to 3.
+The Board tab, Board overlay, and settings page use the same durable value.
+Dragging past the limit queues the Ticket until a slot frees. Until the queue
+lands (issue #5), the Board warns and allows the move.
 
 ### In Review
 

@@ -8,6 +8,13 @@ conflicts, agents need plugin plumbing to read cards) and a hybrid markdown +
 JSON index (two sources of truth for state). Per-Ticket files mean Agent
 Sessions read and edit their own Ticket with plain file tools, git history is
 reviewable per ticket, and the Ticket File doubles as the session's initial
-brief. A known trade-off: column order and scan performance are derived from
+brief.
+
+This decision covers Ticket state only. Per-Workspace Board configuration
+lives in `storageDomain`, keyed by Workspace UUID. Its UUID-to-repository-path
+mapping locates the Ticket Files but does not copy their state. The WIP limit
+is Workspace configuration, so it also lives in that record.
+
+A known trade-off: column order and scan performance are derived from
 directory order plus frontmatter rather than an optimized index; acceptable at
 board scale, and an index can be added later without changing the format.

@@ -19,7 +19,8 @@ Vocabulary throughout follows `CONTEXT.md`; rationale lives in `docs/adr/`.
 - Client: `sidebar.footer.action` "Kanban" button → full-screen
   `shell.overlay` board: five columns, drag-and-drop, card editor, Blocked
   badge, WIP-limit warning. `conversation.view` "Board" tab (same component,
-  scoped to the session's workspace). `settings.section` page stub.
+  scoped to the session's Workspace). `settings.section` page with per-Workspace
+  WIP limits.
 - Cut line for v1 demo: a workspace kanban that survives restarts via the
   repo files.
 
@@ -89,7 +90,7 @@ Vocabulary throughout follows `CONTEXT.md`; rationale lives in `docs/adr/`.
 
 ## M6 — Settings, autonomy, polish
 
-- `settings.section` full page: per-workspace WIP limit (default 2), label
+- `settings.section` full page: per-Workspace WIP limit (default 3), label
   mapping, sync interval.
 - Autopilot: per-workspace opt-in; board-spawned sessions run with the
   elevated policy for that workspace; off = Attention Badge flow (M2).
