@@ -53,8 +53,13 @@ Ticket to Ready is the user's refinement act.
 Exactly one Agent Session owns this Ticket, working in that Ticket's
 Worktree. The column carries a per-Workspace WIP limit, which defaults to 3.
 The Board tab, Board overlay, and settings page use the same durable value.
-Dragging past the limit queues the Ticket until a slot frees. Until the queue
-lands (issue #5), the Board warns and allows the move.
+Dragging past the limit queues the Ticket until a slot frees: a queued
+Ticket sits In Progress with a Queued badge, owns no Agent Session, and does
+not count toward the limit. The queue is earliest-first, ordered by the
+instant each Ticket was queued. When a running Ticket leaves In Progress —
+moving to In Review, Done, or anywhere else — the earliest queued Ticket
+spawns automatically, respecting the limit. Manually dequeuing returns the
+Ticket to Ready with no session spawned.
 
 ### In Review
 
@@ -171,7 +176,9 @@ by scanning the directory; Agent Sessions read and edit Ticket Files with
 plain file tools.
 
 Frontmatter keys: `id` (KAN-<n>), `title`, `column` (one of `backlog`,
-`ready`, `in-progress`, `in-review`, `done` — kebab-case), `blocked`
+`ready`, `in-progress`, `in-review`, `done` — kebab-case), `queued` (the UTC
+instant the Ticket was queued past the WIP limit; empty/absent means not
+queued — see ADR-0005), `blocked`
 (free-text reason, shown as a Blocked badge in any column; empty/absent
 means not Blocked), `issue` (Issue URL, empty when none), `base` (`head` for
 the committed local HEAD override; absent means the remote default branch),

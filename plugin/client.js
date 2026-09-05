@@ -45,6 +45,11 @@ return {
       { key: 'done', label: 'Done' },
     ]
 
+    // Mirror of kanbanIsQueued in plugin/queue.js — keep in lockstep. A
+    // queued Ticket sits In Progress with a recorded queued instant and no
+    // Agent Session; it does not count toward the WIP limit.
+    const isQueued = (card) => card.column === 'in-progress' && (card.queued || '') !== ''
+
     // Every mounted Board reads Ticket Files and settings again after any
     // surface commits a change. This keeps overlay and tab views aligned.
     const boardChanges = { value: 0, listeners: new Set() }
@@ -84,6 +89,31 @@ return {
         card.blocked === ''
           ? null
           : h('div', { className: 'kanban-card-blocked', title: card.blocked }, 'Blocked — ' + card.blocked),
+        isQueued(card)
+          ? h(
+              'div',
+              {
+                className: 'kanban-card-queued',
+                title: 'Waiting for a free WIP slot. It starts automatically when one frees.',
+              },
+              'Queued',
+            )
+          : null,
+        isQueued(card)
+          ? h(
+              'a',
+              {
+                className: 'kanban-card-dequeue',
+                href: '#',
+                onClick: (event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  props.onDequeue(card.file)
+                },
+              },
+              'Dequeue to Ready',
+            )
+          : null,
         card.sessionId === '' || card.column !== 'in-progress'
           ? null
           : h(
@@ -123,7 +153,10 @@ return {
               title: props.column.key === 'in-progress' ? 'WIP limit ' + String(props.wipLimit) : undefined,
             },
             props.column.key === 'in-progress'
-              ? String(props.cards.length) + ' / ' + String(props.wipLimit)
+              ? String(props.runningCount) +
+                  ' / ' +
+                  String(props.wipLimit) +
+                  (props.queuedCount > 0 ? ' · ' + String(props.queuedCount) + ' queued' : '')
               : String(props.cards.length),
           ),
         ),
@@ -138,6 +171,7 @@ return {
               onDragStart: props.onDragStartCard,
               onDragEnd: props.onDragEndCard,
               onOpenSession: props.onOpenSession,
+              onDequeue: props.onDequeue,
             }),
           ),
         ),
@@ -270,47 +304,6 @@ return {
       )
     }
 
-    // Warning shown when a drop into In Progress would pass the WIP limit.
-    // The move is still allowed — issue #2 asks for a warning, not a queue.
-    function WipWarning(props) {
-      return h(
-        'div',
-        {
-          className: 'kanban-dialog-backdrop',
-          onKeyDown: (event) => {
-            if (event.key === 'Escape') {
-              event.stopPropagation()
-              props.onCancel()
-            }
-          },
-        },
-        h(
-          'div',
-          { className: 'kanban-dialog' },
-          h('div', { className: 'kanban-dialog-title' }, 'WIP limit reached'),
-          h(
-            'div',
-            { className: 'kanban-dialog-text' },
-            'In Progress already holds ' +
-              String(props.count) +
-              ' Tickets (WIP limit ' +
-              String(props.wipLimit) +
-              '). Move anyway?',
-          ),
-          h(
-            'div',
-            { className: 'kanban-dialog-actions' },
-            h('button', { className: 'kanban-btn', type: 'button', onClick: props.onCancel }, 'Cancel'),
-            h(
-              'button',
-              { className: 'kanban-btn kanban-btn-primary', type: 'button', autoFocus: true, onClick: props.onConfirm },
-              'Move anyway',
-            ),
-          ),
-        ),
-      )
-    }
-
     function Board(props) {
       const workspace = props.workspace
       const [result, setResult] = React.useState(null)
@@ -319,7 +312,6 @@ return {
       const [dialog, setDialog] = React.useState(null) // {mode:'create'} | {mode:'edit', card}
       const [dragFile, setDragFile] = React.useState(null)
       const [dragOverColumn, setDragOverColumn] = React.useState(null)
-      const [pendingMove, setPendingMove] = React.useState(null) // {file, column, count}
       const [moveError, setMoveError] = React.useState(null)
       const boardVersion = useBoardVersion()
       const workspaceId = workspace === undefined ? undefined : workspace.workspaceId
@@ -355,9 +347,10 @@ return {
 
       const tickets = result === null ? [] : result.tickets
       const wipLimit = result === null ? null : result.wipLimit
+      const runningCount = tickets.filter((ticket) => ticket.column === 'in-progress' && !isQueued(ticket)).length
+      const queuedCount = tickets.filter(isQueued).length
 
       const doMove = (file, column) => {
-        setPendingMove(null)
         setMoveError(null)
         host.call('ticket.move', { workspaceId, file, column }).then(
           (reply) => {
@@ -371,16 +364,12 @@ return {
         )
       }
 
+      // The host owns the queue decision: an over-limit drop into In
+      // Progress queues the Ticket there (issue #5), so the Board sends
+      // every move and renders the state the host reports back.
       const requestMove = (file, column) => {
         const card = tickets.find((ticket) => ticket.file === file)
         if (card === undefined || card.column === column) return
-        if (column === 'in-progress') {
-          const count = tickets.filter((ticket) => ticket.column === 'in-progress').length
-          if (count >= wipLimit) {
-            setPendingMove({ file, column, count })
-            return
-          }
-        }
         doMove(file, column)
       }
 
@@ -406,6 +395,8 @@ return {
               cards: tickets.filter((ticket) => ticket.column === column.key),
               dragOver: dragOverColumn === column.key,
               wipLimit,
+              runningCount,
+              queuedCount,
               onEditCard: (card) => setDialog({ mode: 'edit', card }),
               onDragStartCard: (file) => setDragFile(file),
               onDragEndCard: () => {
@@ -417,6 +408,7 @@ return {
                 setOpen(false)
                 sessions.open(sessionId)
               },
+              onDequeue: (file) => doMove(file, 'ready'),
               onDragOver: (event, key) => {
                 if (dragFile === null) return
                 event.preventDefault()
@@ -508,14 +500,6 @@ return {
                 setDialog(null)
                 notifyBoardChange()
               },
-            }),
-        pendingMove === null
-          ? null
-          : h(WipWarning, {
-              count: pendingMove.count,
-              wipLimit,
-              onCancel: () => setPendingMove(null),
-              onConfirm: () => doMove(pendingMove.file, pendingMove.column),
             }),
       )
     }
@@ -760,6 +744,12 @@ return {
       '.kanban-card-blocked{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-state-error-primary);border:1px solid var(--dsw-alias-state-error-primary);',
       'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.kanban-card-queued{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
+      'color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l1);',
+      'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.kanban-card-dequeue{display:inline-block;margin-top:7px;font-size:11px;font-weight:600;',
+      'color:var(--dsw-alias-label-secondary);text-decoration:none;}',
+      '.kanban-card-dequeue:hover{text-decoration:underline;}',
       '.kanban-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;',
       'gap:8px;padding:40px;text-align:center;}',
       '.kanban-state-title{font-size:15px;font-weight:600;}',

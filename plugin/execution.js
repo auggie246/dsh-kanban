@@ -160,6 +160,9 @@ async function kanbanStartTicketExecution(request, adapter) {
     ['branch', branch],
     ['worktreePath', worktreePath],
     ['sessionId', sessionId],
+    // Spawning clears the issue #5 queue marker; removing an absent key is a
+    // no-op, so non-queued starts keep their text byte-identical here.
+    ['queued', null],
   ]
   for (const [key, value] of linkedAttrs) {
     linkedTicketText = adapter.setTicketAttr(linkedTicketText, key, value)

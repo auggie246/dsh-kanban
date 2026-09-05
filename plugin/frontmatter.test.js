@@ -245,3 +245,54 @@ test('preview is empty when the body has no prose', () => {
   const text = ['---', 'id: KAN-6', 'title: x', 'column: backlog', '---', '', '# Only headings', ''].join('\n')
   assert.equal(parseTicketFile('KAN-6-x.md', text).preview, '')
 })
+
+// Issue #5: the queued marker. `queued` records the UTC instant a Ticket was
+// queued past the WIP limit; absent or empty means not queued.
+
+test('parseTicketFile surfaces the queued instant from a quoted scalar', () => {
+  const text = [
+    '---',
+    'id: KAN-103',
+    'title: x',
+    'column: in-progress',
+    'queued: "2026-07-14T09:30:00.000Z"',
+    '---',
+    'b',
+  ].join('\n')
+  const card = parseTicketFile('KAN-103-x.md', text)
+  assert.equal(card.queued, '2026-07-14T09:30:00.000Z')
+})
+
+test('parseTicketFile reports an empty queued value when the key is absent', () => {
+  const text = ['---', 'id: KAN-103', 'title: x', 'column: ready', '---', 'b'].join('\n')
+  assert.equal(parseTicketFile('KAN-103-x.md', text).queued, '')
+})
+
+test('serializeTicketFile writes queued in canonical order after column', () => {
+  const text = serializeTicketFile(
+    { id: 'KAN-103', title: 'x', column: 'in-progress', queued: '2026-07-14T09:30:00.000Z' },
+    'b\n',
+  )
+  assert.equal(
+    text,
+    '---\nid: KAN-103\ntitle: x\ncolumn: in-progress\nqueued: "2026-07-14T09:30:00.000Z"\n---\nb\n',
+  )
+})
+
+test('serializeTicketFile output with queued parses back to the same card', () => {
+  const attrs = { id: 'KAN-103', title: 'x', column: 'in-progress', queued: '2026-07-14T09:30:00.000Z' }
+  const card = parseTicketFile('KAN-103-x.md', serializeTicketFile(attrs, 'b\n'))
+  assert.equal(card.queued, '2026-07-14T09:30:00.000Z')
+})
+
+test('kanbanSetAttr queues a Ticket with the quoted instant', () => {
+  const before = '---\nid: KAN-103\ntitle: x\ncolumn: in-progress\n---\nbody\n'
+  const after = '---\nid: KAN-103\ntitle: x\ncolumn: in-progress\nqueued: "2026-07-14T09:30:00.000Z"\n---\nbody\n'
+  assert.equal(kanbanSetAttr(before, 'queued', '2026-07-14T09:30:00.000Z'), after)
+})
+
+test('kanbanSetAttr removes the queued marker when the Ticket dequeues', () => {
+  const before = '---\nid: KAN-103\ntitle: x\ncolumn: in-progress\nqueued: "2026-07-14T09:30:00.000Z"\n---\nbody\n'
+  const after = '---\nid: KAN-103\ntitle: x\ncolumn: in-progress\n---\nbody\n'
+  assert.equal(kanbanSetAttr(before, 'queued', null), after)
+})
