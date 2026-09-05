@@ -51,7 +51,11 @@ return {
     // Mirror of kanbanIsQueued in plugin/queue.js — keep in lockstep. A
     // queued Ticket sits In Progress with a recorded queued instant and no
     // Agent Session; it does not count toward the WIP limit.
-    const isQueued = (card) => card.column === 'in-progress' && (card.queued || '') !== ''
+    const isQueued = (card) => {
+      if (card.column !== 'in-progress') return false
+      const instant = Date.parse(String(card.queued || '').trim())
+      return !Number.isNaN(instant)
+    }
 
     // Every mounted Board reads Ticket Files and settings again after any
     // surface commits a change. This keeps overlay and tab views aligned.
