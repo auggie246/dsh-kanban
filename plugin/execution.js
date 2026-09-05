@@ -153,6 +153,9 @@ async function kanbanStartTicketExecution(request, adapter) {
     sessionId,
     worktreePath,
     branch,
+    // The commit the branch spawns from; the watch loop compares the branch
+    // head against it to decide whether the branch has commits.
+    baseSha: '',
   }
   let linkedTicketText = input.ticketText
   const linkedAttrs = [
@@ -173,6 +176,7 @@ async function kanbanStartTicketExecution(request, adapter) {
   const nextIgnore = kanbanEnsureIgnoreLine(ignore, KANBAN_WORKTREE_IGNORE)
   if (nextIgnore !== ignore) await adapter.writeIgnore(nextIgnore)
   const baseRef = input.baseMode === 'head' ? 'HEAD' : await kanbanRemoteDefault(adapter)
+  linkage.baseSha = await adapter.runGit(['rev-parse', baseRef])
   let worktreeCreated = false
   let session
   let ticketPersisted = false
@@ -229,6 +233,9 @@ const kanbanExecutionRecordSchema = {
       sessionId: value.sessionId,
       worktreePath: value.worktreePath,
       branch: value.branch,
+      // Optional: linkage records stored before the watch loop (issue #6)
+      // carry no spawn sha; the watch loop treats a missing one as no commits.
+      baseSha: typeof value.baseSha === 'string' ? value.baseSha : '',
     }
   },
 }

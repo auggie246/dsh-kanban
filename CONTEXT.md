@@ -67,7 +67,9 @@ The Agent Session has finished and produced its result (committed changes on
 the Ticket's branch; a PR/MR when the Workspace has a GitHub/GitLab remote,
 local commits otherwise). Nothing moves until the user accepts or bounces it.
 Bouncing returns the Ticket to In Progress with the user's comment fed back
-to the same Agent Session as revision instructions.
+to the same Agent Session as revision instructions. The Watch Loop moves a
+Ticket here without user action: when the Ticket's Agent Session idles after
+a completed turn and the Ticket's branch has commits past its spawn sha.
 
 ### Done
 
@@ -95,6 +97,25 @@ same Worktree), and Send back to Ready (release the Worktree).
 A DSH agent session spawned by the Board for one Ticket. Its working
 directory is the Ticket's Worktree. One Ticket in In Progress has exactly one
 Agent Session, and one Agent Session serves exactly one Ticket.
+
+### Watch Loop
+
+The Board's session watcher on the Host. It subscribes to the DSH
+`session/event` stream (`turn/end` with its reason, plus the log-only
+`approval/asked`/`approval/decided` audit events) and to `agent/status`
+transitions, and drives two behaviours. Auto-move: an In Progress Ticket
+whose session idles after a completed turn moves to In Review when the
+Ticket's branch has commits past its Spawn Sha. Attention: the loop derives
+each session's Attention Badge state (awaiting approval, errored, finished)
+from the same events; badge state is live-only and never durable.
+
+### Spawn Sha
+
+The commit a Ticket's branch was created from, recorded in the execution
+linkage when the Ticket moves to In Progress. The Watch Loop compares the
+branch head against it: a different head means the branch has commits. A
+missing spawn sha (Tickets started before the Watch Loop existed) fails
+closed — the Ticket never auto-moves.
 
 ### Worktree
 

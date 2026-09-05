@@ -1,4 +1,4 @@
-// Client half of the kanban Plugin — M1 (issue #4, Ticket execution links).
+// Client half of the kanban Plugin — M2 (issue #6, attention badges).
 //
 // Registers four additive Slots: sidebar button, full-page Board overlay,
 // per-session Board tab, and per-Workspace Board settings.
@@ -7,6 +7,9 @@
 //
 // Ticket edits and Board settings persist only through Host JSON methods.
 // After each successful write, every mounted Board reloads its Workspace.
+// The Host derives Attention Badge state from real session events; the
+// client polls the small board.watch.list aggregate and re-reads the Board
+// when it changes.
 
 return {
   apply(ctx) {
@@ -56,7 +59,56 @@ return {
     const notifyBoardChange = () => publishStoreValue(boardChanges, boardChanges.value + 1)
     const useBoardVersion = () => useStoreValue(boardChanges)
 
+    // Live session-watch state (issue #6). watchSummary holds the last
+    // board.watch.list reply; watchChanges bumps when it changes so mounted
+    // Boards re-read their cards. The poll lives in the sidebar button,
+    // which stays mounted while the Board is closed.
+    const ATTENTION_LABELS = {
+      approval: 'Awaiting approval',
+      error: 'Errored',
+      finished: 'Finished',
+    }
+    const WATCH_POLL_MS = 5000
+    const watchSummary = { value: { count: 0, tickets: [] }, listeners: new Set() }
+    const watchChanges = { value: 0, listeners: new Set() }
+    const useWatchVersion = () => useStoreValue(watchChanges)
+
+    const useWatchPoll = () => {
+      React.useEffect(() => {
+        let stopped = false
+        let lastJson = JSON.stringify(watchSummary.value)
+        const poll = () => {
+          host.call('board.watch.list', {}).then(
+            (reply) => {
+              if (stopped || !reply || !reply.ok) return
+              const next = {
+                count: typeof reply.count === 'number' ? reply.count : 0,
+                tickets: Array.isArray(reply.tickets) ? reply.tickets : [],
+              }
+              const json = JSON.stringify(next)
+              if (json === lastJson) return
+              lastJson = json
+              publishStoreValue(watchSummary, next)
+              publishStoreValue(watchChanges, watchChanges.value + 1)
+            },
+            () => {
+              // The watch aggregate is advisory; a failed poll retries on
+              // the next interval.
+            },
+          )
+        }
+        poll()
+        const timer = setInterval(poll, WATCH_POLL_MS)
+        return () => {
+          stopped = true
+          clearInterval(timer)
+        }
+      }, [])
+    }
+
     function BoardButton(owner) {
+      useWatchPoll()
+      const watch = useStoreValue(watchSummary)
       return h(
         'button',
         {
@@ -66,7 +118,28 @@ return {
           title: 'Open the Board for the current Workspace',
         },
         owner && owner.wide === false ? 'K' : 'Kanban',
+        watch.count > 0
+          ? h(
+              'span',
+              {
+                className: 'kanban-sidebar-attention',
+                title:
+                  String(watch.count) +
+                  ' Ticket ' +
+                  (watch.count === 1 ? 'session needs' : 'sessions need') +
+                  ' attention',
+              },
+              String(watch.count),
+            )
+          : null,
       )
+    }
+
+    const sessionLinkLabel = (card) => {
+      if (card.attention !== null && card.attention !== undefined && ATTENTION_LABELS[card.attention] !== undefined) {
+        return 'Agent Session ' + ATTENTION_LABELS[card.attention].toLowerCase()
+      }
+      return card.column === 'in-progress' ? 'Agent Session running' : 'Open Agent Session'
     }
 
     function BoardCard(props) {
@@ -114,7 +187,17 @@ return {
               'Dequeue to Ready',
             )
           : null,
-        card.sessionId === '' || card.column !== 'in-progress'
+        card.attention === null || card.attention === undefined || ATTENTION_LABELS[card.attention] === undefined
+          ? null
+          : h(
+              'div',
+              {
+                className: 'kanban-card-attention kanban-attention-' + card.attention,
+                title: ATTENTION_LABELS[card.attention],
+              },
+              ATTENTION_LABELS[card.attention],
+            ),
+        card.sessionId === ''
           ? null
           : h(
               'a',
@@ -127,7 +210,7 @@ return {
                   props.onOpenSession(card.sessionId)
                 },
               },
-              'Agent Session running',
+              sessionLinkLabel(card),
             ),
       )
     }
@@ -314,6 +397,7 @@ return {
       const [dragOverColumn, setDragOverColumn] = React.useState(null)
       const [moveError, setMoveError] = React.useState(null)
       const boardVersion = useBoardVersion()
+      const watchVersion = useWatchVersion()
       const workspaceId = workspace === undefined ? undefined : workspace.workspaceId
 
       React.useEffect(() => {
@@ -343,7 +427,7 @@ return {
         return () => {
           cancelled = true
         }
-      }, [workspaceId, boardVersion])
+      }, [workspaceId, boardVersion, watchVersion])
 
       const tickets = result === null ? [] : result.tickets
       const wipLimit = result === null ? null : result.wipLimit
@@ -700,6 +784,10 @@ return {
       'border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:transparent;',
       'color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer;}',
       '.kanban-sidebar-btn:hover{background:var(--dsw-alias-bg-layer-1);}',
+      // Aggregate Attention Badge count on the sidebar button (issue #6).
+      '.kanban-sidebar-attention{margin-left:auto;min-width:18px;padding:0 5px;text-align:center;',
+      'font-size:11px;font-weight:700;border-radius:9px;color:var(--dsw-alias-state-warn-primary);',
+      'border:1px solid var(--dsw-alias-state-warn-primary);background:var(--dsw-alias-bg-base);}',
       // Stack the foot actions vertically: Cordis pill, then Kanban, then
       // the Settings row below. This one rule selects the owner container,
       // not our own node; it is deliberately minimal and explicitly coupled
@@ -750,6 +838,13 @@ return {
       '.kanban-card-dequeue{display:inline-block;margin-top:7px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-label-secondary);text-decoration:none;}',
       '.kanban-card-dequeue:hover{text-decoration:underline;}',
+      // Attention Badge on a card: the session awaits approval, errored, or
+      // finished (issue #6). One state color per badge kind.
+      '.kanban-card-attention{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
+      'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid transparent;}',
+      '.kanban-attention-approval{color:var(--dsw-alias-state-warn-primary);border-color:var(--dsw-alias-state-warn-primary);}',
+      '.kanban-attention-error{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary);}',
+      '.kanban-attention-finished{color:var(--dsw-alias-state-success-primary);border-color:var(--dsw-alias-state-success-primary);}',
       '.kanban-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;',
       'gap:8px;padding:40px;text-align:center;}',
       '.kanban-state-title{font-size:15px;font-weight:600;}',

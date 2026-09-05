@@ -93,6 +93,9 @@ test('moving a Ready Ticket starts isolated work from the remote default branch'
 
   assert.equal(result.branch, 'kanban/KAN-101-fix-login')
   assert.equal(result.worktreePath, path.join(repo.workspace, '.dsh-kanban/worktrees/fix-login'))
+  // The watch loop compares the branch head against this spawn sha to decide
+  // whether the kanban branch has commits (issue #6).
+  assert.equal(result.baseSha, git(repo.workspace, 'rev-parse', 'origin/main'))
   assert.equal(fs.readFileSync(path.join(result.worktreePath, 'remote.txt'), 'utf8'), 'remote base\n')
   assert.equal(fs.existsSync(path.join(result.worktreePath, 'local-only.txt')), false)
   assert.equal(fs.readFileSync(path.join(repo.workspace, 'local-only.txt'), 'utf8'), 'local head\n')
