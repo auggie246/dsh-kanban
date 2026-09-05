@@ -95,8 +95,9 @@ Agent Session, and one Agent Session serves exactly one Ticket.
 
 A git worktree created for one Ticket, isolating its edits from the main
 checkout and from other Tickets. Branched from the remote default branch by
-default ("fresh"); a Ticket may instead branch from local HEAD, chosen per
-Ticket. Each Ticket's Worktree has its own branch.
+default ("fresh"); a Ticket may instead branch from committed local HEAD,
+chosen per Ticket. Working-tree changes never enter this base. Each Ticket's
+Worktree has its own branch.
 
 ### Refinement
 
@@ -172,9 +173,10 @@ plain file tools.
 Frontmatter keys: `id` (KAN-<n>), `title`, `column` (one of `backlog`,
 `ready`, `in-progress`, `in-review`, `done` — kebab-case), `blocked`
 (free-text reason, shown as a Blocked badge in any column; empty/absent
-means not Blocked), `issue` (Issue URL, empty when none), `branch`,
-`worktree`, `session` (Agent Session id). Values are scalars on one line;
-multi-line YAML is not used. Scalars containing `:`, `#`, quotes or
+means not Blocked), `issue` (Issue URL, empty when none), `base` (`head` for
+the committed local HEAD override; absent means the remote default branch),
+`branch`, `worktreePath`, and `sessionId` (Agent Session id). Values are
+scalars on one line; multi-line YAML is not used. Scalars containing `:`, `#`, quotes or
 backslashes are double-quoted with `\"` and `\\` escapes. The
 `<id>-<slug>` file name is fixed at creation: editing the title does not
 rename the file. The parser and serializer live in `plugin/frontmatter.js`

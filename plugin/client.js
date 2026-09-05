@@ -1,4 +1,4 @@
-// Client half of the kanban Plugin — M0 (issue #3, Board tabs and settings).
+// Client half of the kanban Plugin — M1 (issue #4, Ticket execution links).
 //
 // Registers four additive Slots: sidebar button, full-page Board overlay,
 // per-session Board tab, and per-Workspace Board settings.
@@ -12,6 +12,7 @@ return {
   apply(ctx) {
     const slots = ctx.get('slots')
     if (slots === undefined) return
+    const sessions = ctx.get('sessions')
 
     const h = React.createElement
 
@@ -83,6 +84,21 @@ return {
         card.blocked === ''
           ? null
           : h('div', { className: 'kanban-card-blocked', title: card.blocked }, 'Blocked — ' + card.blocked),
+        card.sessionId === '' || card.column !== 'in-progress'
+          ? null
+          : h(
+              'a',
+              {
+                className: 'kanban-card-session',
+                href: '#',
+                onClick: (event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  props.onOpenSession(card.sessionId)
+                },
+              },
+              'Agent Session running',
+            ),
       )
     }
 
@@ -121,6 +137,7 @@ return {
               onEdit: props.onEditCard,
               onDragStart: props.onDragStartCard,
               onDragEnd: props.onDragEndCard,
+              onOpenSession: props.onOpenSession,
             }),
           ),
         ),
@@ -135,6 +152,7 @@ return {
       const [title, setTitle] = React.useState(editing ? props.card.title : '')
       const [body, setBody] = React.useState(editing ? props.card.body : '')
       const [blocked, setBlocked] = React.useState(editing ? props.card.blocked : '')
+      const [base, setBase] = React.useState(editing ? props.card.base : 'remote')
       const [saving, setSaving] = React.useState(false)
       const [error, setError] = React.useState(null)
 
@@ -146,7 +164,7 @@ return {
         setSaving(true)
         setError(null)
         const method = editing ? 'ticket.update' : 'ticket.create'
-        const payload = { workspaceId: props.workspaceId, title: title.trim(), body }
+        const payload = { workspaceId: props.workspaceId, title: title.trim(), body, base }
         if (editing) {
           payload.file = props.card.file
           payload.blocked = blocked.trim()
@@ -204,6 +222,21 @@ return {
               placeholder: 'Goal, context, acceptance criteria — markdown.',
               onChange: (event) => setBody(event.target.value),
             }),
+          ),
+          h(
+            'label',
+            { className: 'kanban-field' },
+            h('span', { className: 'kanban-field-label' }, 'Worktree base'),
+            h(
+              'select',
+              {
+                className: 'kanban-input',
+                value: base,
+                onChange: (event) => setBase(event.target.value),
+              },
+              h('option', { value: 'remote' }, 'Remote default branch'),
+              h('option', { value: 'head' }, 'Local HEAD'),
+            ),
           ),
           editing
             ? h(
@@ -378,6 +411,11 @@ return {
               onDragEndCard: () => {
                 setDragFile(null)
                 setDragOverColumn(null)
+              },
+              onOpenSession: (sessionId) => {
+                if (sessions === undefined) return
+                setOpen(false)
+                sessions.open(sessionId)
               },
               onDragOver: (event, key) => {
                 if (dragFile === null) return
@@ -716,6 +754,9 @@ return {
       '.kanban-card-id{font-size:11px;font-weight:600;color:var(--dsw-alias-brand-primary);}',
       '.kanban-card-title{font-size:13px;font-weight:500;margin-bottom:4px;}',
       '.kanban-card-preview{font-size:12px;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-card-session{display:inline-block;margin-top:7px;font-size:11px;font-weight:600;',
+      'color:var(--dsw-alias-brand-primary);text-decoration:none;}',
+      '.kanban-card-session:hover{text-decoration:underline;}',
       '.kanban-card-blocked{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-state-error-primary);border:1px solid var(--dsw-alias-state-error-primary);',
       'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',

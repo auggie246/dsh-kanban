@@ -101,7 +101,17 @@ function kanbanScalar(value) {
 
 // The documented frontmatter keys (CONTEXT.md, Ticket File), in canonical
 // write order. Keys outside this set are never written by the serializer.
-const KANBAN_KEY_ORDER = ['id', 'title', 'column', 'blocked', 'issue', 'branch', 'worktree', 'session']
+const KANBAN_KEY_ORDER = [
+  'id',
+  'title',
+  'column',
+  'blocked',
+  'issue',
+  'base',
+  'branch',
+  'worktreePath',
+  'sessionId',
+]
 
 // serializeTicketFile(attrs, body) → the full Ticket File text. Only the
 // documented keys are written; undefined/null values are omitted, an empty
@@ -192,6 +202,11 @@ function parseTicketFile(fileName, text) {
     title: (fm.attrs.title || '').trim() || kanbanFirstHeading(fm.body) || fileName,
     column: kanbanNormalizeColumn(fm.attrs.column),
     blocked: (fm.attrs.blocked || '').trim(),
+    issue: (fm.attrs.issue || '').trim(),
+    base: fm.attrs.base === 'head' ? 'head' : 'remote',
+    branch: (fm.attrs.branch || '').trim(),
+    worktreePath: (fm.attrs.worktreePath || fm.attrs.worktree || '').trim(),
+    sessionId: (fm.attrs.sessionId || fm.attrs.session || '').trim(),
     body: fm.body,
     preview: kanbanBodyPreview(fm.body, 160),
   }

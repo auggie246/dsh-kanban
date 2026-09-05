@@ -30,7 +30,8 @@ Vocabulary throughout follows `CONTEXT.md`; rationale lives in `docs/adr/`.
 
 - Host: worktree layer — `git worktree add .dsh-kanban/worktrees/<slug>` on
   branch `kanban/<id>-<slug>`, base = remote default branch (per-ticket
-  override: local HEAD); `.gitignore` line for the worktree dir, added once.
+  override: committed local HEAD, excluding working-tree changes); `.gitignore`
+  line for the worktree dir, added once.
 - Host: spawn — `ctx.agents.create({ meta: { cwd: worktreePath } })`,
   `agent.followup(brief)` where the brief is the Ticket File contents plus
   board rules (commit on branch `kanban/...`, do not touch the main checkout).

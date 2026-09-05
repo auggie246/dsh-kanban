@@ -1,0 +1,240 @@
+// Ticket execution module — pure orchestration behind one tested interface.
+//
+// Dynamic Host Packages concatenate this file before plugin/host.js. The
+// production Host supplies adapters for Git, files, Agent Sessions, and
+// storageDomain. Tests supply adapters at the same seam.
+
+const KANBAN_WORKTREE_IGNORE = '.dsh-kanban/worktrees/'
+
+function kanbanExecutionInput(request) {
+  if (request === null || typeof request !== 'object') throw new Error('Ticket execution request required')
+  const workspaceId = String(request.workspaceId || '').trim()
+  const workspacePath = String(request.workspacePath || '').replace(/\/+$/, '')
+  const ticketId = String(request.ticketId || '').trim().toUpperCase()
+  const ticketSlug = String(request.ticketSlug || '').trim().toLowerCase()
+  const ticketText = String(request.ticketText || '')
+  const baseMode = request.baseMode === 'head' ? 'head' : 'remote'
+  if (workspaceId === '') throw new Error('Ticket execution requires a Workspace id')
+  if (workspacePath === '') throw new Error('Ticket execution requires a Workspace path')
+  if (!/^KAN-\d+$/.test(ticketId)) throw new Error('Ticket execution requires a KAN id')
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(ticketSlug) || ticketSlug.length > 40) {
+    throw new Error('Ticket execution requires a valid Ticket slug')
+  }
+  return { workspaceId, workspacePath, ticketId, ticketSlug, ticketText, baseMode }
+}
+
+function kanbanEnsureIgnoreLine(text, line) {
+  const lines = String(text || '').split(/\r?\n/)
+  if (lines.includes(line)) return String(text || '')
+  let next = String(text || '')
+  if (next !== '' && !next.endsWith('\n')) next += '\n'
+  return next + line + '\n'
+}
+
+function kanbanExecutionBrief(ticketText, branch, workspacePath, worktreePath) {
+  return [
+    'Complete the Ticket below.',
+    '',
+    'Board rules:',
+    '- Work only on branch `' + branch + '`.',
+    '- Work only inside the Worktree `' + worktreePath + '`.',
+    '- Never touch the main checkout `' + workspacePath + '`.',
+    '- Commit completed work to `' + branch + '`.',
+    '',
+    'Ticket File:',
+    '',
+    ticketText,
+  ].join('\n')
+}
+
+// Bind the dynamic Host capabilities to the Ticket execution interface.
+function kanbanHostExecutionAdapter(deps) {
+  const workspacePath = deps.workspace.path.replace(/\/+$/, '')
+  const shellQuote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'"
+  const runGit = async (args) => {
+    const result = await deps.shell.run(
+      deps.shell.resolve({
+        command: ['git', ...args].map(shellQuote).join(' '),
+        workdir: deps.workspace.path,
+        timeoutMs: 120000,
+        stdoutMaxBytes: 262144,
+      }),
+    )
+    if (result.exitCode !== 0) {
+      const detail = result.stderr.text.trim() || result.stdout.text.trim() || 'git command failed'
+      throw new Error(detail)
+    }
+    return result.stdout.text.trim()
+  }
+  return {
+    runGit,
+    async readIgnore() {
+      const target = await deps.fs.resolve(workspacePath + '/.gitignore')
+      const info = await deps.fs.stat(target)
+      if (info === undefined) return ''
+      if (info.type !== 'file') throw new Error('.gitignore is not a file')
+      return deps.fs.readText(target)
+    },
+    async writeIgnore(text) {
+      const target = await deps.fs.resolve(workspacePath + '/.gitignore')
+      await deps.fs.writeText(target, text)
+    },
+    setTicketAttr: deps.setTicketAttr,
+    persistTicket: (text) => deps.fs.writeText(deps.loaded.target, text),
+    persistLinkage: (key, linkage) => deps.executionTable.put(key, linkage),
+    deleteLinkage: (key) => deps.executionTable.delete(key),
+    async createSession(spec) {
+      const selection = deps.agentDefaultModel.currentSelection()
+      const preset = await deps.agentPresets.resolve()
+      const handle = await deps.agents.create({
+        sessionId: spec.sessionId,
+        meta: { cwd: spec.cwd, agentPreset: preset.id },
+        agentOptions: { provider: selection.provider, model: selection.model },
+        setup: (agentCtx) => deps.agentPresets.mount(agentCtx, preset.id),
+      })
+      await handle.agent.whenIdle()
+      return { id: handle.agent.id, agent: handle.agent, dispose: () => handle.dispose() }
+    },
+    disposeSession: (session) => session.dispose(),
+    async followup(session, brief) {
+      session.agent.followup({
+        id: 'kanban-brief-' + session.id,
+        role: 'user',
+        content: [{ type: 'text', text: brief }],
+        source: { kind: 'plugin', plugin: 'dsh-kanban' },
+      })
+    },
+  }
+}
+
+async function kanbanRemoteDefault(adapter) {
+  const remotes = String(await adapter.runGit(['remote']))
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter((value) => value !== '')
+  if (remotes.length === 0) throw new Error('Workspace has no git remote')
+  const remote = remotes[0]
+  if (!/^[A-Za-z0-9._-]+$/.test(remote)) throw new Error('Workspace git remote name is unsafe')
+  const prefix = remote + '/'
+  let branch
+  try {
+    const symbolic = String(
+      await adapter.runGit(['symbolic-ref', '--quiet', '--short', 'refs/remotes/' + remote + '/HEAD']),
+    ).trim()
+    if (symbolic.startsWith(prefix) && symbolic.length > prefix.length) branch = symbolic.slice(prefix.length)
+  } catch {
+    // A remote can declare HEAD without a local refs/remotes/<name>/HEAD.
+  }
+  if (branch === undefined) {
+    const description = String(await adapter.runGit(['remote', 'show', remote]))
+    const match = /^\s*HEAD branch:\s*(\S+)\s*$/m.exec(description)
+    if (match !== null) branch = match[1]
+  }
+  if (branch === undefined) throw new Error('Workspace remote default branch is unavailable')
+  if (!/^[A-Za-z0-9._/-]+$/.test(branch) || branch.includes('..')) {
+    throw new Error('Workspace remote default branch is unsafe')
+  }
+  await adapter.runGit(['fetch', '--quiet', remote, branch])
+  return remote + '/' + branch
+}
+
+async function kanbanStartTicketExecution(request, adapter) {
+  const input = kanbanExecutionInput(request)
+  const branch = 'kanban/' + input.ticketId + '-' + input.ticketSlug
+  const relativeWorktreePath = '.dsh-kanban/worktrees/' + input.ticketSlug
+  const worktreePath = input.workspacePath + '/' + relativeWorktreePath
+  const sessionId = ('kanban-' + input.workspaceId + '-' + input.ticketId)
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+  const linkageKey = input.workspaceId + '/' + input.ticketId
+  const linkage = {
+    workspaceId: input.workspaceId,
+    ticketId: input.ticketId,
+    sessionId,
+    worktreePath,
+    branch,
+  }
+  let linkedTicketText = input.ticketText
+  const linkedAttrs = [
+    ['column', 'in-progress'],
+    ['branch', branch],
+    ['worktreePath', worktreePath],
+    ['sessionId', sessionId],
+  ]
+  for (const [key, value] of linkedAttrs) {
+    linkedTicketText = adapter.setTicketAttr(linkedTicketText, key, value)
+    if (linkedTicketText === null) throw new Error('Ticket File frontmatter is invalid')
+  }
+
+  const ignore = await adapter.readIgnore()
+  const nextIgnore = kanbanEnsureIgnoreLine(ignore, KANBAN_WORKTREE_IGNORE)
+  if (nextIgnore !== ignore) await adapter.writeIgnore(nextIgnore)
+  const baseRef = input.baseMode === 'head' ? 'HEAD' : await kanbanRemoteDefault(adapter)
+  let worktreeCreated = false
+  let session
+  let ticketPersisted = false
+  let linkagePersisted = false
+  try {
+    await adapter.runGit(['worktree', 'add', '-b', branch, relativeWorktreePath, baseRef])
+    worktreeCreated = true
+    session = await adapter.createSession({ sessionId, cwd: worktreePath })
+    await adapter.persistTicket(linkedTicketText)
+    ticketPersisted = true
+    await adapter.persistLinkage(linkageKey, linkage)
+    linkagePersisted = true
+    await adapter.followup(session, kanbanExecutionBrief(input.ticketText, branch, input.workspacePath, worktreePath))
+    return linkage
+  } catch (error) {
+    const cleanupErrors = []
+    const clean = async (operation) => {
+      try {
+        await operation()
+      } catch (cleanupError) {
+        cleanupErrors.push(String((cleanupError && cleanupError.message) || cleanupError))
+      }
+    }
+    if (ticketPersisted) await clean(() => adapter.persistTicket(input.ticketText))
+    if (linkagePersisted) await clean(() => adapter.deleteLinkage(linkageKey))
+    if (session !== undefined) await clean(() => adapter.disposeSession(session))
+    if (worktreeCreated) {
+      await clean(() => adapter.runGit(['worktree', 'remove', '--force', relativeWorktreePath]))
+      await clean(() => adapter.runGit(['branch', '-D', branch]))
+    }
+    if (cleanupErrors.length > 0) {
+      throw new Error(
+        String((error && error.message) || error) + '; rollback failed: ' + cleanupErrors.join('; '),
+      )
+    }
+    throw error
+  }
+}
+
+const kanbanExecutionRecordSchema = {
+  parse(value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Ticket execution linkage must be an object')
+    }
+    const fields = ['workspaceId', 'ticketId', 'sessionId', 'worktreePath', 'branch']
+    for (const field of fields) {
+      if (typeof value[field] !== 'string' || value[field] === '') {
+        throw new Error('Ticket execution linkage requires ' + field)
+      }
+    }
+    return {
+      workspaceId: value.workspaceId,
+      ticketId: value.ticketId,
+      sessionId: value.sessionId,
+      worktreePath: value.worktreePath,
+      branch: value.branch,
+    }
+  },
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    KANBAN_WORKTREE_IGNORE,
+    kanbanEnsureIgnoreLine,
+    kanbanExecutionBrief,
+    kanbanStartTicketExecution,
+  }
+}

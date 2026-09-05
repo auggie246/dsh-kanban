@@ -1,7 +1,7 @@
-// Host half of the kanban Plugin — M0 (issue #3, Board tabs and settings).
+// Host half of the kanban Plugin — M1 (issue #4, Ticket execution).
 //
-// `cordis_define` receives plugin/frontmatter.js and plugin/settings.js
-// concatenated before this file. Their pure helpers are already in scope.
+// `cordis_define` receives plugin/frontmatter.js, plugin/settings.js, and
+// plugin/execution.js concatenated before this file. Their helpers are in scope.
 // Plain JavaScript only: no imports, no TypeScript, and no Node globals.
 //
 // Write behaviour: every Ticket File write goes through the fs service's
@@ -12,18 +12,28 @@
 // is never overwritten.
 
 return {
-  inject: ['workspaceRegistry', 'fs', 'storageDomain'],
+  inject: ['workspaceRegistry', 'fs', 'storageDomain', 'shell', 'agents', 'agentDefaultModel', 'agentPresets'],
   async apply(ctx) {
     const registry = ctx.workspaceRegistry
     const fs = ctx.fs
     const storageDomain = ctx.storageDomain
+    const shell = ctx.shell
+    const agents = ctx.agents
+    const agentDefaultModel = ctx.agentDefaultModel
+    const agentPresets = ctx.agentPresets
 
-    const domain = await storageDomain.open({
+    const settingsDomain = await storageDomain.open({
       name: 'kanban_settings',
       version: 1,
       tables: { workspaces: { valueSchema: kanbanSettingsRecordSchema } },
     })
-    const settingsTable = domain.table('workspaces')
+    const settingsTable = settingsDomain.table('workspaces')
+    const executionDomain = await storageDomain.open({
+      name: 'kanban_execution',
+      version: 1,
+      tables: { tickets: { valueSchema: kanbanExecutionRecordSchema } },
+    })
+    const executionTable = executionDomain.table('tickets')
     let settingsAdmissionOpen = true
     let settingsTail = Promise.resolve()
 
@@ -41,7 +51,8 @@ return {
       () => async () => {
         settingsAdmissionOpen = false
         await settingsTail
-        await domain.close()
+        await executionDomain.close()
+        await settingsDomain.close()
       },
       'kanban.settingsDomainClose',
     )
@@ -127,9 +138,34 @@ return {
       return { target, text }
     }
 
+    const syncExecutionLinkage = async (workspaceId, card) => {
+      const key = workspaceId + '/' + card.id
+      const stored = executionTable.get(key)
+      if (card.sessionId === '' || card.worktreePath === '' || card.branch === '') {
+        if (stored !== undefined) await executionTable.delete(key)
+        return
+      }
+      const linkage = {
+        workspaceId,
+        ticketId: card.id,
+        sessionId: card.sessionId,
+        worktreePath: card.worktreePath,
+        branch: card.branch,
+      }
+      if (
+        stored === undefined ||
+        stored.sessionId !== linkage.sessionId ||
+        stored.worktreePath !== linkage.worktreePath ||
+        stored.branch !== linkage.branch
+      ) {
+        await executionTable.put(key, linkage)
+      }
+    }
+
     // board.list({ workspaceId }) → card data for every Ticket File in the
-    // Workspace. Read-only: a missing directory is an empty Board, not an
-    // error; a single unreadable file is logged and skipped. Cards carry
+    // Workspace. Ticket Files stay read-only; this call also repairs their
+    // derived execution linkage index. A missing directory is an empty Board,
+    // not an error; a single unreadable file is logged and skipped. Cards carry
     // the full body now: the card editor pre-fills from board.list output,
     // which saves a second round trip per opened Ticket.
     ctx.effect(() =>
@@ -156,7 +192,14 @@ return {
             try {
               const text = await fs.readText(entry.target)
               const card = parseTicketFile(entry.name, text)
-              if (card !== null) tickets.push({ ...card, file: entry.name })
+              if (card !== null) {
+                try {
+                  await syncExecutionLinkage(workspaceLookup.workspaceId, card)
+                } catch (err) {
+                  console.error('board.list: execution linkage sync failed for ' + card.id + ': ' + String((err && err.message) || err))
+                }
+                tickets.push({ ...card, file: entry.name })
+              }
             } catch (err) {
               console.error('board.list: skipping unreadable Ticket File ' + entry.name + ': ' + String((err && err.message) || err))
             }
@@ -219,6 +262,7 @@ return {
         const title = String((args && args.title) || '').trim()
         if (title === '') return { ok: false, error: 'title required' }
         const body = String((args && args.body) || '')
+        const base = args && args.base === 'head' ? 'head' : undefined
         const dirPath = ticketsDir(workspaceLookup.workspace)
         try {
           let names = []
@@ -233,7 +277,7 @@ return {
           }
           const id = kanbanNextId(names)
           const file = id + '-' + kanbanSlug(title) + '.md'
-          const text = serializeTicketFile({ id, title, column: 'backlog', issue: '' }, body)
+          const text = serializeTicketFile({ id, title, column: 'backlog', issue: '', base }, body)
           const target = await fs.resolve(dirPath + '/' + file)
           await fs.writeText(target, text, { kind: 'createIfAbsent' })
           return { ok: true, id, file }
@@ -243,9 +287,9 @@ return {
       }),
     )
 
-    // ticket.update({ workspaceId, file, title, body, blocked }) → rewrites
-    // title, blocked and body via surgical patches, so every other
-    // frontmatter field (issue, branch, worktree, session, unknown keys)
+    // ticket.update({ workspaceId, file, title, body, blocked, base }) →
+    // rewrites title, blocked, base and body via surgical patches, so every
+    // other frontmatter field (issue, branch, linkage, unknown keys)
     // stays byte-identical. An empty blocked value clears the badge.
     ctx.effect(() =>
       harness.handle('ticket.update', async (args) => {
@@ -260,6 +304,7 @@ return {
           const blocked = String((args && args.blocked) || '').trim()
           let text = kanbanSetAttr(loaded.text, 'title', title)
           text = kanbanSetAttr(text, 'blocked', blocked === '' ? null : blocked)
+          text = kanbanSetAttr(text, 'base', args && args.base === 'head' ? 'head' : null)
           text = kanbanSetBody(text, String((args && args.body) || ''))
           if (text === null) return { ok: false, error: 'not-a-ticket-file' }
           await fs.writeText(loaded.target, text)
@@ -270,22 +315,52 @@ return {
       }),
     )
 
-    // ticket.move({ workspaceId, file, column }) → rewrites only the column
-    // frontmatter field; body and every other key stay byte-identical.
+    // ticket.move({ workspaceId, file, column }) starts Ticket execution only
+    // for Ready → In Progress. Other valid moves retain their surgical write.
     ctx.effect(() =>
       harness.handle('ticket.move', async (args) => {
         const workspaceLookup = workspaceOf(args)
         if (workspaceLookup.workspace === undefined) return { ok: false, error: workspaceLookup.error }
         const column = String((args && args.column) || '').trim().toLowerCase()
         if (!KANBAN_COLUMNS.includes(column)) return { ok: false, error: 'invalid-column' }
+        const file = String((args && args.file) || '')
         const dirPath = ticketsDir(workspaceLookup.workspace)
         try {
-          const loaded = await readTicket(dirPath, String((args && args.file) || ''))
+          const loaded = await readTicket(dirPath, file)
           if (loaded.error !== undefined) return { ok: false, error: loaded.error }
+          const card = parseTicketFile(file, loaded.text)
+          if (card === null) return { ok: false, error: 'not-a-ticket-file' }
+          if (column === 'in-progress' && card.column === 'ready') {
+            if (card.sessionId !== '') return { ok: false, error: 'ticket-already-started' }
+            const slugMatch = /^kan-\d+-([a-z0-9-]+)\.md$/i.exec(file)
+            if (slugMatch === null) return { ok: false, error: 'invalid-ticket-file' }
+            const linkage = await kanbanStartTicketExecution(
+              {
+                workspaceId: workspaceLookup.workspaceId,
+                workspacePath: workspaceLookup.workspace.path,
+                ticketId: card.id,
+                ticketSlug: slugMatch[1],
+                ticketText: loaded.text,
+                baseMode: card.base,
+              },
+              kanbanHostExecutionAdapter({
+                workspace: workspaceLookup.workspace,
+                loaded,
+                fs,
+                shell,
+                agents,
+                agentDefaultModel,
+                agentPresets,
+                executionTable,
+                setTicketAttr: kanbanSetAttr,
+              }),
+            )
+            return { ok: true, file, column, ...linkage }
+          }
           const text = kanbanSetAttr(loaded.text, 'column', column)
           if (text === null) return { ok: false, error: 'not-a-ticket-file' }
           await fs.writeText(loaded.target, text)
-          return { ok: true, file: String(args.file), column }
+          return { ok: true, file, column }
         } catch (err) {
           return { ok: false, error: 'ticket-move-failed: ' + String((err && err.message) || err) }
         }

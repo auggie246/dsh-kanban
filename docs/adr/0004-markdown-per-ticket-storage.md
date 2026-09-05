@@ -15,6 +15,12 @@ lives in `storageDomain`, keyed by Workspace UUID. Its UUID-to-repository-path
 mapping locates the Ticket Files but does not copy their state. The WIP limit
 is Workspace configuration, so it also lives in that record.
 
+ADR-0001 requires one narrow derived index: `storageDomain` mirrors each
+Ticket's Agent Session linkage for fast process-side lookup. The Ticket File
+remains authoritative. Board reads never reconstruct missing Ticket state from
+the mirror. This avoids the rejected two-source hybrid while supporting Agent
+Session event lookup without scanning every Ticket File.
+
 A known trade-off: column order and scan performance are derived from
 directory order plus frontmatter rather than an optimized index; acceptable at
 board scale, and an index can be added later without changing the format.
