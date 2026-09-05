@@ -1,8 +1,9 @@
-// Host half of the kanban Plugin — M1 (issue #4, Ticket execution).
+// Host half of the kanban Plugin — M2 (issue #6, session watch loop).
 //
-// `cordis_define` receives plugin/frontmatter.js, plugin/settings.js, and
-// plugin/execution.js concatenated before this file. Their helpers are in scope.
-// Plain JavaScript only: no imports, no TypeScript, and no Node globals.
+// `cordis_define` receives plugin/frontmatter.js, plugin/settings.js,
+// plugin/execution.js, and plugin/watch.js concatenated before this file.
+// Their helpers are in scope. Plain JavaScript only: no imports, no
+// TypeScript, and no Node globals.
 //
 // Write behaviour: every Ticket File write goes through the fs service's
 // writeText, which stages the content in a private temp file and publishes
@@ -151,6 +152,10 @@ return {
         sessionId: card.sessionId,
         worktreePath: card.worktreePath,
         branch: card.branch,
+        // The spawn sha is recorded by ticket execution and cannot be
+        // derived from the Ticket File; carry it across re-syncs so the
+        // watch loop's commit check survives a linkage rewrite.
+        baseSha: stored !== undefined && typeof stored.baseSha === 'string' ? stored.baseSha : '',
       }
       if (
         stored === undefined ||
@@ -161,6 +166,136 @@ return {
         await executionTable.put(key, linkage)
       }
     }
+
+    // Session-watch state (issue #6). Both maps are live-only: they are
+    // rebuilt from real events as sessions run, and the durable facts stay
+    // in the Ticket Files and the execution linkage table.
+    const watchAttention = new Map() // sessionId → 'approval' | 'error' | 'finished'
+    const watchLastTurnEnd = new Map() // sessionId → last turn/end reason kind
+
+    // Locate one Ticket File by its Ticket id. The Ticket File — not the
+    // linkage record — is the source of truth for the Ticket's column.
+    const findTicketByTicketId = async (workspaceId, ticketId) => {
+      const workspace = registry.get(workspaceId)
+      if (workspace === undefined) return undefined
+      let dir
+      try {
+        dir = await fs.resolve(ticketsDir(workspace))
+        const info = await fs.stat(dir)
+        if (info === undefined || info.type !== 'directory') return undefined
+      } catch {
+        return undefined
+      }
+      const entries = await fs.listDir(dir)
+      for (const entry of entries) {
+        if (entry.type !== 'file' || !entry.name.toLowerCase().endsWith('.md')) continue
+        try {
+          const text = await fs.readText(entry.target)
+          const card = parseTicketFile(entry.name, text)
+          if (card !== null && card.id === ticketId) return { card, text, target: entry.target }
+        } catch {
+          // An unreadable Ticket File cannot be watched; skip it.
+        }
+      }
+      return undefined
+    }
+
+    const watchRunGit = (workdir, args) => {
+      const result = shell.run(
+        shell.resolve({
+          command: args.map((arg) => "'" + String(arg).replace(/'/g, "'\\''") + "'").join(' '),
+          workdir,
+          timeoutMs: 30000,
+          stdoutMaxBytes: 65536,
+        }),
+      )
+      return result.then((run) => {
+        if (run.exitCode !== 0) throw new Error(run.stderr.text.trim() || 'git command failed')
+        return run.stdout.text.trim()
+      })
+    }
+
+    // Bind the dynamic Host capabilities to the Board session-watch seam
+    // (plugin/watch.js). Every side effect goes through this adapter.
+    const watchAdapter = {
+      async linkageFor(sessionId) {
+        for (const key of executionTable.keys()) {
+          const linkage = executionTable.get(key)
+          if (linkage !== undefined && linkage.sessionId === sessionId) return linkage
+        }
+        return undefined
+      },
+      async linkedTicketColumn(linkage) {
+        const found = await findTicketByTicketId(linkage.workspaceId, linkage.ticketId)
+        // A stale linkage (frontmatter edited by hand) must not move a
+        // Ticket that no longer belongs to this session.
+        if (found === undefined || found.card.sessionId !== linkage.sessionId) return ''
+        return found.card.column
+      },
+      branchHasCommits: (linkage) => {
+        const workspace = registry.get(linkage.workspaceId)
+        if (workspace === undefined) return Promise.resolve(false)
+        return kanbanBranchHasCommits(linkage, (args) => watchRunGit(workspace.path, args))
+      },
+      async moveTicketToInReview(linkage) {
+        const found = await findTicketByTicketId(linkage.workspaceId, linkage.ticketId)
+        if (found === undefined) return
+        const text = kanbanSetAttr(found.text, 'column', 'in-review')
+        if (text === null) return
+        await fs.writeText(found.target, text)
+      },
+    }
+
+    // Drive one signal through the watch seam. A watch failure must never
+    // break the Host event loop, so everything is contained here.
+    const forwardWatchSignal = async (request) => {
+      try {
+        const { attention } = await kanbanHandleSessionSignal(request, watchAdapter)
+        if (attention !== undefined) {
+          if (attention === null) watchAttention.delete(request.sessionId)
+          else watchAttention.set(request.sessionId, attention)
+        }
+      } catch (err) {
+        console.error('kanban watch: ' + request.signal + ' for ' + request.sessionId + ' failed: ' + String((err && err.message) || err))
+      }
+    }
+
+    // The session-watch interface: DSH session events in, watch signals out.
+    // `approval/asked` and `approval/decided` are log-only audit events on
+    // the session log, so observing them never joins the approval waterfall.
+    ctx.on('session/event', (session, event) => {
+      const sessionId = session && session.id
+      if (sessionId === undefined || sessionId === '') return
+      if (event.type === 'turn/end') {
+        const kind = (event.data && event.data.reason && event.data.reason.kind) || ''
+        watchLastTurnEnd.set(sessionId, kind)
+        void forwardWatchSignal({ signal: 'turn-end', sessionId, reason: { kind } })
+        return
+      }
+      if (event.type === 'approval/asked') {
+        void forwardWatchSignal({ signal: 'approval-asked', sessionId })
+      } else if (event.type === 'approval/decided') {
+        void forwardWatchSignal({ signal: 'approval-decided', sessionId })
+      }
+    })
+
+    // agent/status fires exactly on running ↔ idle transitions; `reasonKind`
+    // carries the preceding turn's end reason so an idle after a completed
+    // turn can auto-move its Ticket. Any queued input re-opens a turn first,
+    // so idle genuinely means the loop is done.
+    ctx.on('agent/status', ({ agent, status }) => {
+      const sessionId = agent && agent.id
+      if (sessionId === undefined || sessionId === '') return
+      const reasonKind = status === 'idle' ? watchLastTurnEnd.get(sessionId) : undefined
+      if (status === 'idle') watchLastTurnEnd.delete(sessionId)
+      void forwardWatchSignal({ signal: 'status', sessionId, status, reasonKind })
+    })
+
+    ctx.on('agent/error', ({ agent }) => {
+      const sessionId = agent && agent.id
+      if (sessionId === undefined || sessionId === '') return
+      void forwardWatchSignal({ signal: 'agent-error', sessionId })
+    })
 
     // board.list({ workspaceId }) → card data for every Ticket File in the
     // Workspace. Ticket Files stay read-only; this call also repairs their
@@ -198,7 +333,13 @@ return {
                 } catch (err) {
                   console.error('board.list: execution linkage sync failed for ' + card.id + ': ' + String((err && err.message) || err))
                 }
-                tickets.push({ ...card, file: entry.name })
+                tickets.push({
+                  ...card,
+                  file: entry.name,
+                  // Live Attention Badge state for the card's session; null
+                  // when the session needs nothing.
+                  attention: watchAttention.get(card.sessionId) || null,
+                })
               }
             } catch (err) {
               console.error('board.list: skipping unreadable Ticket File ' + entry.name + ': ' + String((err && err.message) || err))
@@ -213,6 +354,25 @@ return {
           }
         } catch (err) {
           return { ok: false, error: 'board-read-failed: ' + String((err && err.message) || err) }
+        }
+      }),
+    )
+
+    // board.watch.list() → the live Attention Badge aggregate across every
+    // registered Workspace's linked Tickets. The sidebar Kanban button polls
+    // this while the Board is closed; the reply is owned plain JSON.
+    ctx.effect(() =>
+      harness.handle('board.watch.list', async () => {
+        try {
+          const linkages = []
+          for (const key of executionTable.keys()) {
+            const linkage = executionTable.get(key)
+            if (linkage !== undefined) linkages.push(linkage)
+          }
+          const summary = kanbanWatchSummary(linkages, (sessionId) => watchAttention.get(sessionId))
+          return { ok: true, count: summary.count, tickets: summary.tickets }
+        } catch (err) {
+          return { ok: false, error: 'watch-read-failed: ' + String((err && err.message) || err) }
         }
       }),
     )
