@@ -209,3 +209,66 @@ test('the local HEAD override includes local commits and keeps one worktree igno
   assert.equal(git(first.worktreePath, 'branch', '--show-current'), 'kanban/KAN-102-use-local-head')
   assert.equal(git(second.worktreePath, 'branch', '--show-current'), 'kanban/KAN-103-second-ticket')
 })
+
+test('auto-spawning a queued Ticket clears the queued marker in the persisted file', async (t) => {
+  const repo = makeRepository()
+  t.after(() => fs.rmSync(repo.root, { recursive: true, force: true }))
+  const adapter = makeAdapter(repo.workspace)
+
+  const result = await kanbanStartTicketExecution(
+    {
+      workspaceId: 'workspace-alpha',
+      workspacePath: repo.workspace,
+      ticketId: 'KAN-103',
+      ticketSlug: 'queued-start',
+      ticketText:
+        '---\nid: KAN-103\ntitle: Queued start\ncolumn: in-progress\nqueued: "2026-07-14T09:30:00.000Z"\n---\nSpawn me from the queue.\n',
+      baseMode: 'remote',
+    },
+    adapter,
+  )
+
+  const persisted = adapter.observed.ticketLinks[0]
+  assert.equal(
+    persisted,
+    '---\nid: KAN-103\ntitle: Queued start\ncolumn: in-progress\nbranch: kanban/KAN-103-queued-start\nworktreePath: ' +
+      result.worktreePath +
+      '\nsessionId: ' +
+      result.sessionId +
+      '\n---\nSpawn me from the queue.\n',
+  )
+  const reopened = parseTicketFile('KAN-103-queued-start.md', persisted)
+  assert.equal(reopened.queued, '')
+  assert.equal(reopened.column, 'in-progress')
+})
+
+test('a failed auto-spawn rolls the Ticket back to its queued state', async (t) => {
+  const repo = makeRepository()
+  t.after(() => fs.rmSync(repo.root, { recursive: true, force: true }))
+  const adapter = makeAdapter(repo.workspace)
+  adapter.followup = async () => {
+    throw new Error('followup failed')
+  }
+  const queuedText =
+    '---\nid: KAN-105\ntitle: Roll back queue\ncolumn: in-progress\nqueued: "2026-07-14T09:30:00.000Z"\n---\nStay queued.\n'
+
+  await assert.rejects(
+    kanbanStartTicketExecution(
+      {
+        workspaceId: 'workspace-alpha',
+        workspacePath: repo.workspace,
+        ticketId: 'KAN-105',
+        ticketSlug: 'roll-back-queue',
+        ticketText: queuedText,
+        baseMode: 'head',
+      },
+      adapter,
+    ),
+    /followup failed/,
+  )
+
+  assert.equal(adapter.observed.ticketLinks.at(-1), queuedText)
+  const reopened = parseTicketFile('KAN-105-roll-back-queue.md', adapter.observed.ticketLinks.at(-1))
+  assert.equal(reopened.queued, '2026-07-14T09:30:00.000Z')
+  assert.equal(reopened.column, 'in-progress')
+})
