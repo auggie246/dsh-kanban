@@ -1,4 +1,4 @@
-// Host half of the kanban Plugin — M2 (issue #7, review Bounce).
+// Host half of the kanban Plugin — execution, review Bounce, and Stalled recovery.
 //
 // `cordis_define` receives plugin/frontmatter.js, plugin/settings.js,
 // plugin/queue.js, plugin/execution.js, plugin/watch.js, and plugin/bounce.js concatenated
@@ -22,6 +22,10 @@ return {
     const agents = ctx.agents
     const agentDefaultModel = ctx.agentDefaultModel
     const agentPresets = ctx.agentPresets
+    // Retain exact factory handles: disposing an Agent scope alone does not
+    // unregister its session. Never dispose an unrelated, externally owned Agent.
+    const sessionHandles = new Map()
+    const rememberSession = (handle) => sessionHandles.set(handle.agent.id, handle)
 
     const settingsDomain = await storageDomain.open({
       name: 'kanban_settings',
@@ -254,6 +258,7 @@ return {
             fs,
             shell,
             agents,
+            rememberSession,
             agentDefaultModel,
             agentPresets,
             executionTable,
@@ -281,6 +286,10 @@ return {
       if (loaded.error !== undefined) return { ok: false, error: loaded.error }
       const card = parseTicketFile(file, loaded.text)
       if (card === null) return { ok: false, error: 'not-a-ticket-file' }
+
+      if (card.column === 'in-progress' && !kanbanIsQueued(card) && column === 'ready') {
+        return { ok: false, error: 'send-back-required' }
+      }
 
       if (card.column === 'in-review' && column === 'in-progress') {
         return { ok: false, error: 'bounce-comment-required' }
@@ -322,6 +331,7 @@ return {
             fs,
             shell,
             agents,
+            rememberSession,
             agentDefaultModel,
             agentPresets,
             executionTable,
@@ -343,12 +353,23 @@ return {
     // rebuilt from real events as sessions run, and the durable facts stay
     // in the Ticket Files and the execution linkage table.
     const watchAttention = new Map() // sessionId → 'approval' | 'error' | 'finished'
+    const watchMessages = new Map() // sessionId → owned error message
     const watchLastTurnEnd = new Map() // sessionId → last turn/end reason kind
     const watchRevision = new Map() // sessionId → generation of the current turn
     const invalidateWatch = (sessionId) => {
       watchRevision.set(sessionId, (watchRevision.get(sessionId) || 0) + 1)
       watchLastTurnEnd.delete(sessionId)
       watchAttention.delete(sessionId)
+      watchMessages.delete(sessionId)
+    }
+
+    const cardAttention = (card) => {
+      const attention = watchAttention.get(card.sessionId) || null
+      if (card.column !== 'in-progress' || kanbanIsQueued(card)) return attention
+      const agent = agents.get(card.sessionId)
+      if (!card.sessionId || agent === undefined) return 'error'
+      if (agent.status === 'idle' && attention !== 'approval') return 'error'
+      return attention
     }
 
     // Locate one Ticket File by its Ticket id. The Ticket File — not the
@@ -413,7 +434,7 @@ return {
       branchHasCommits: (linkage) => {
         const workspace = registry.get(linkage.workspaceId)
         if (workspace === undefined) return Promise.resolve(false)
-        return kanbanBranchHasCommits(linkage, (args) => watchRunGit(workspace.path, args))
+        return kanbanBranchHasCommits(linkage, (args) => watchRunGit(workspace.path, ['git', ...args]))
       },
       async moveTicketToInReview(linkage, revision) {
         // Recheck inside the move tail: a Bounce or a new turn may have
@@ -458,6 +479,9 @@ return {
       if (sessionId === undefined || sessionId === '') return
       if (event.type === 'turn/end') {
         const kind = (event.data && event.data.reason && event.data.reason.kind) || ''
+        const failure = event.data && event.data.reason && event.data.reason.error
+        if (kind === 'error') watchMessages.set(sessionId,
+          failure && typeof failure.message === 'string' ? failure.message : 'Agent Session errored.')
         watchLastTurnEnd.set(sessionId, kind)
         void forwardWatchSignal({ signal: 'turn-end', sessionId, reason: { kind } })
         return
@@ -482,9 +506,13 @@ return {
       void forwardWatchSignal({ signal: 'status', sessionId, status, reasonKind })
     })
 
-    ctx.on('agent/error', ({ agent }) => {
+    ctx.on('agent/error', ({ agent, error }) => {
       const sessionId = agent && agent.id
       if (sessionId === undefined || sessionId === '') return
+      invalidateWatch(sessionId)
+      watchLastTurnEnd.set(sessionId, 'error')
+      watchMessages.set(sessionId, error && typeof error.message === 'string' ? error.message :
+        typeof error === 'string' ? error : 'Agent Session errored.')
       void forwardWatchSignal({ signal: 'agent-error', sessionId })
     })
 
@@ -504,7 +532,10 @@ return {
           // nothing.
           const tickets = (await readBoardCards(workspaceLookup)).map((card) => ({
             ...card,
-            attention: watchAttention.get(card.sessionId) || null,
+            attention: cardAttention(card),
+            stalled: card.column === 'in-progress' && cardAttention(card) === 'error',
+            attentionMessage: cardAttention(card) === 'error'
+              ? watchMessages.get(card.sessionId) || 'Agent Session stopped before completing the Ticket.' : null,
           }))
           return {
             ok: true,
@@ -525,12 +556,16 @@ return {
     ctx.effect(() =>
       harness.handle('board.watch.list', async () => {
         try {
-          const linkages = []
-          for (const key of executionTable.keys()) {
-            const linkage = executionTable.get(key)
-            if (linkage !== undefined) linkages.push(linkage)
+          const tickets = []
+          for (const workspace of registry.list()) {
+            const workspaceId = String(workspace.id)
+            for (const card of await readBoardCards({ workspaceId, workspace })) {
+              const attention = cardAttention(card)
+              if (attention) tickets.push({ workspaceId, ticketId: card.id, attention })
+            }
           }
-          const summary = kanbanWatchSummary(linkages, (sessionId) => watchAttention.get(sessionId))
+          tickets.sort((a, b) => a.ticketId.localeCompare(b.ticketId))
+          const summary = { count: tickets.length, tickets }
           return { ok: true, count: summary.count, tickets: summary.tickets }
         } catch (err) {
           return { ok: false, error: 'watch-read-failed: ' + String((err && err.message) || err) }
@@ -639,6 +674,186 @@ return {
         }
       }),
     )
+
+    let recoverySequence = 0
+    const recoveryTicket = async (workspaceLookup, file) => {
+      const loaded = await readTicket(ticketsDir(workspaceLookup.workspace), file)
+      if (loaded.error) throw new Error(loaded.error)
+      const card = parseTicketFile(file, loaded.text)
+      if (card.column !== 'in-progress' || kanbanIsQueued(card) || cardAttention(card) !== 'error') {
+        throw new Error('ticket-not-stalled')
+      }
+      if (!card.sessionId || !card.branch || !card.worktreePath) throw new Error('ticket-not-started')
+      const slug = /^kan-\d+-([a-z0-9-]+)\.md$/i.exec(file)[1]
+      const root = workspaceLookup.workspace.path.replace(/\/+$/, '')
+      if (card.worktreePath !== root + '/.dsh-kanban/worktrees/' + slug ||
+          card.branch !== 'kanban/' + card.id + '-' + slug) throw new Error('unsafe-execution-linkage')
+      const agent = agents.get(card.sessionId)
+      if (agent !== undefined && agent.status !== 'idle') throw new Error('session-not-idle')
+      return { loaded, card, agent }
+    }
+
+    ctx.effect(() => harness.handle('ticket.resume', async (args) => {
+      const lookup = workspaceOf(args)
+      if (!lookup.workspace) return { ok: false, error: lookup.error }
+      try {
+        return await enqueueMove(async () => {
+          let { card, agent } = await recoveryTicket(lookup, String((args && args.file) || ''))
+          if (!agent) {
+            const handle = await agents.resume({
+              resumeSessionId: card.sessionId,
+              setup: (agentCtx) => agentPresets.mount(agentCtx, agentCtx.agent.session.header.agentPreset),
+            })
+            rememberSession(handle)
+            try {
+              await handle.agent.whenIdle()
+              if (handle.agent.session.header.cwd !== card.worktreePath) throw new Error('session-worktree-mismatch')
+              agent = handle.agent
+            } catch (error) {
+              await handle.dispose()
+              sessionHandles.delete(card.sessionId)
+              throw error
+            }
+          }
+          if (agents.get(card.sessionId) !== agent || agent.status !== 'idle') throw new Error('session-not-idle')
+          agent.steer({
+            id: 'kanban-resume-' + card.sessionId + '-' + Date.now() + '-' + (++recoverySequence),
+            role: 'user', content: [{ type: 'text', text: 'Continue the Ticket from where you stopped. Keep existing work and commit the completed result.' }],
+          })
+          invalidateWatch(card.sessionId)
+          return { ok: true, sessionId: card.sessionId }
+        })
+      } catch (err) {
+        return { ok: false, error: 'ticket-resume-failed: ' + String((err && err.message) || err) }
+      }
+    }))
+
+    ctx.effect(() => harness.handle('ticket.retry', async (args) => {
+      const lookup = workspaceOf(args)
+      if (!lookup.workspace) return { ok: false, error: lookup.error }
+      try {
+        return await enqueueMove(async () => {
+          const file = String((args && args.file) || '')
+          const { loaded, card, agent } = await recoveryTicket(lookup, file)
+          const git = (args) => watchRunGit(lookup.workspace.path, ['git', '-C', card.worktreePath, ...args])
+          if (await git(['rev-parse', '--show-toplevel']) !== card.worktreePath ||
+              await git(['symbolic-ref', '--short', 'HEAD']) !== card.branch) throw new Error('worktree-linkage-mismatch')
+          if (agent && (agents.get(card.sessionId) !== agent || agent.status !== 'idle')) throw new Error('session-not-idle')
+          if (agent) {
+            const handle = sessionHandles.get(card.sessionId)
+            if (!handle || handle.agent !== agent) throw new Error('session-not-owned-by-board')
+            await handle.dispose()
+            sessionHandles.delete(card.sessionId)
+          }
+          invalidateWatch(card.sessionId)
+          const adapter = kanbanHostExecutionAdapter({
+            workspace: lookup.workspace, loaded, fs, shell, agents, rememberSession,
+            agentDefaultModel, agentPresets, executionTable, setTicketAttr: kanbanSetAttr,
+          })
+          const sessionId = 'kanban-retry-' + card.id.toLowerCase() + '-' + Date.now() + '-' + (++recoverySequence)
+          const key = lookup.workspaceId + '/' + card.id
+          const previous = executionTable.get(key)
+          let session
+          try {
+            session = await adapter.createSession({ sessionId, cwd: card.worktreePath })
+            await adapter.persistTicket(kanbanSetAttr(loaded.text, 'sessionId', sessionId))
+            await adapter.persistLinkage(key, {
+              workspaceId: lookup.workspaceId, ticketId: card.id, sessionId,
+              branch: card.branch, worktreePath: card.worktreePath, baseSha: previous ? previous.baseSha : '',
+            })
+            await adapter.followup(session,
+              'Continue the Ticket. Inspect and preserve existing work in this Worktree before making changes.\n\n' +
+              kanbanExecutionBrief(loaded.text, card.branch, lookup.workspace.path, card.worktreePath))
+            return { ok: true, sessionId }
+          } catch (error) {
+            const failures = []
+            for (const operation of [
+              () => session && adapter.disposeSession(session),
+              () => adapter.persistTicket(loaded.text),
+              () => previous ? adapter.persistLinkage(key, previous) : adapter.deleteLinkage(key),
+            ]) {
+              try { await operation() } catch (failure) { failures.push(String(failure.message || failure)) }
+            }
+            watchAttention.set(card.sessionId, 'error')
+            watchMessages.set(card.sessionId, 'Retry fresh failed: ' + String(error.message || error))
+            throw new Error(String(error.message || error) + (failures.length ? '; rollback failed: ' + failures.join('; ') : ''))
+          }
+        })
+      } catch (err) {
+        return { ok: false, error: 'ticket-retry-failed: ' + String((err && err.message) || err) }
+      }
+    }))
+
+    const cleanupConfirmations = new Map()
+    ctx.effect(() => harness.handle('ticket.sendBack', async (args) => {
+      const lookup = workspaceOf(args)
+      if (!lookup.workspace) return { ok: false, error: lookup.error }
+      try {
+        return await enqueueMove(async () => {
+          const file = String((args && args.file) || '')
+          const { loaded, card, agent } = await recoveryTicket(lookup, file)
+          const root = lookup.workspace.path.replace(/\/+$/, '')
+          const handle = agent && sessionHandles.get(card.sessionId)
+          if (agent && (!handle || handle.agent !== agent)) throw new Error('session-not-owned-by-board')
+          const git = (args) => watchRunGit(root, ['git', ...args])
+          const worktree = ['-C', card.worktreePath]
+          if (await git([...worktree, 'rev-parse', '--show-toplevel']) !== card.worktreePath ||
+              await git([...worktree, 'symbolic-ref', '--short', 'HEAD']) !== card.branch) throw new Error('worktree-linkage-mismatch')
+          if (await git([...worktree, 'status', '--porcelain', '--untracked-files=all', '--ignored']) !== '') {
+            throw new Error('worktree-not-clean: preserve or remove uncommitted and ignored files before sending back')
+          }
+          const head = await git(['rev-parse', '--verify', 'refs/heads/' + card.branch])
+          const base = await git(['rev-parse', '--verify', 'HEAD'])
+          const unmergedCommits = Number(await git(['rev-list', '--count', base + '..' + head]))
+          if (!Number.isSafeInteger(unmergedCommits) || unmergedCommits < 0) throw new Error('invalid-commit-count')
+          const key = lookup.workspaceId + '/' + card.id
+          const snapshot = [card.sessionId, card.branch, card.worktreePath, head, base].join('\n')
+          const pending = cleanupConfirmations.get(key)
+          if (unmergedCommits > 0 && (!pending || pending.snapshot !== snapshot || args.confirmation !== pending.token)) {
+            const token = 'cleanup-' + Date.now() + '-' + (++recoverySequence)
+            cleanupConfirmations.set(key, { token, snapshot })
+            return { ok: false, confirmationRequired: true, confirmation: token, unmergedCommits,
+              error: 'Delete ' + unmergedCommits + ' commits not merged into Workspace HEAD, and remove the Worktree?' }
+          }
+          if (agent && (agents.get(card.sessionId) !== agent || agent.status !== 'idle')) throw new Error('session-not-idle')
+          if (handle) { await handle.dispose(); sessionHandles.delete(card.sessionId) }
+          invalidateWatch(card.sessionId)
+          const previous = executionTable.get(key)
+          let removed = false
+          let branchDeleted = false
+          let text = loaded.text
+          for (const [name, value] of [['column', 'ready'], ['sessionId', null], ['worktreePath', null], ['branch', null], ['queued', null]]) {
+            text = kanbanSetAttr(text, name, value)
+          }
+          try {
+            await git(['worktree', 'remove', card.worktreePath])
+            removed = true
+            // Delete only the exact confirmed head; a concurrent commit fails closed.
+            await git(['update-ref', '-d', 'refs/heads/' + card.branch, head])
+            branchDeleted = true
+            await fs.writeText(loaded.target, text)
+            await executionTable.delete(key)
+          } catch (error) {
+            const failures = []
+            const restore = async (operation) => {
+              try { await operation() } catch (failure) { failures.push(String(failure.message || failure)) }
+            }
+            if (branchDeleted) await restore(() => git(['branch', card.branch, head]))
+            if (removed) await restore(() => git(['worktree', 'add', card.worktreePath, card.branch]))
+            await restore(() => fs.writeText(loaded.target, loaded.text))
+            if (previous) await restore(() => executionTable.put(key, previous))
+            watchAttention.set(card.sessionId, 'error')
+            watchMessages.set(card.sessionId, 'Send back failed: ' + String(error.message || error))
+            throw new Error(String(error.message || error) + (failures.length ? '; rollback failed: ' + failures.join('; ') : ''))
+          }
+          cleanupConfirmations.delete(key)
+          await pumpQueue(lookup).catch(logPumpFailure)
+          return { ok: true, column: 'ready' }
+        })
+      } catch (err) {
+        return { ok: false, error: 'ticket-send-back-failed: ' + String((err && err.message) || err) }
+      }
+    }))
 
     let bounceSequence = 0
     ctx.effect(() =>

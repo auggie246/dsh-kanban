@@ -147,14 +147,14 @@ test('attention derives from approval, error, and finished signals', async () =>
   const { kanbanAttentionForSignal } = require('./watch.js')
   const sessionId = 'kanban-workspace-alpha-kan-101'
 
-  // turn/end reasons: error and interrupted are attention-worthy; completed
-  // means finished; a user abort or a mid-turn ceiling is neither.
+  // Issue #8: every stopped mid-work turn needs Stalled recovery;
+  // completed alone means finished.
   assert.equal(kanbanAttentionForSignal({ signal: 'turn-end', sessionId, reason: { kind: 'error' } }), 'error')
   assert.equal(kanbanAttentionForSignal({ signal: 'turn-end', sessionId, reason: { kind: 'interrupted' } }), 'error')
   assert.equal(kanbanAttentionForSignal({ signal: 'turn-end', sessionId, reason: { kind: 'completed' } }), 'finished')
-  assert.equal(kanbanAttentionForSignal({ signal: 'turn-end', sessionId, reason: { kind: 'aborted', reason: { kind: 'user' } } }), null)
-  assert.equal(kanbanAttentionForSignal({ signal: 'turn-end', sessionId, reason: { kind: 'max-tokens' } }), null)
-  assert.equal(kanbanAttentionForSignal({ signal: 'turn-end', sessionId, reason: { kind: 'blocked' } }), null)
+  assert.equal(kanbanAttentionForSignal({ signal: 'turn-end', sessionId, reason: { kind: 'aborted', reason: { kind: 'user' } } }), 'error')
+  assert.equal(kanbanAttentionForSignal({ signal: 'turn-end', sessionId, reason: { kind: 'max-tokens' } }), 'error')
+  assert.equal(kanbanAttentionForSignal({ signal: 'turn-end', sessionId, reason: { kind: 'blocked' } }), 'error')
 
   // Approval audit events: asked shows the badge, decided clears it.
   assert.equal(kanbanAttentionForSignal({ signal: 'approval-asked', sessionId }), 'approval')

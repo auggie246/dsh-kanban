@@ -92,6 +92,7 @@ function kanbanHostExecutionAdapter(deps) {
         agentOptions: { provider: selection.provider, model: selection.model },
         setup: (agentCtx) => deps.agentPresets.mount(agentCtx, preset.id),
       })
+      if (deps.rememberSession) deps.rememberSession(handle)
       await handle.agent.whenIdle()
       return { id: handle.agent.id, agent: handle.agent, dispose: () => handle.dispose() }
     },
@@ -138,12 +139,15 @@ async function kanbanRemoteDefault(adapter) {
   return remote + '/' + branch
 }
 
+let kanbanExecutionSequence = 0
+
 async function kanbanStartTicketExecution(request, adapter) {
   const input = kanbanExecutionInput(request)
   const branch = 'kanban/' + input.ticketId + '-' + input.ticketSlug
   const relativeWorktreePath = '.dsh-kanban/worktrees/' + input.ticketSlug
   const worktreePath = input.workspacePath + '/' + relativeWorktreePath
-  const sessionId = ('kanban-' + input.workspaceId + '-' + input.ticketId)
+  // A released Ticket can start again; its earlier session stays persisted.
+  const sessionId = ('kanban-' + input.workspaceId + '-' + input.ticketId + '-' + Date.now() + '-' + (++kanbanExecutionSequence))
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, '-')
   const linkageKey = input.workspaceId + '/' + input.ticketId

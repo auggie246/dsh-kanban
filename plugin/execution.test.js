@@ -175,7 +175,7 @@ test('a startup failure rolls back the Worktree, branch, Agent Session, and link
   assert.equal(git(repo.workspace, 'branch', '--list', 'kanban/KAN-105-roll-back'), '')
   assert.equal(adapter.observed.ticketLinks.at(-1), original)
   assert.deepEqual(adapter.observed.deletedRecords, ['workspace-alpha/KAN-105'])
-  assert.deepEqual(adapter.observed.disposals, ['kanban-workspace-alpha-kan-105'])
+  assert.deepEqual(adapter.observed.disposals, [adapter.observed.sessions[0].sessionId])
 })
 
 test('the local HEAD override includes local commits and keeps one worktree ignore line', async (t) => {

@@ -1,4 +1,4 @@
-// Client half of the kanban Plugin — M2 (issue #7, review Bounce).
+// Client half of the kanban Plugin — Board, review Bounce, and Stalled recovery.
 //
 // Registers four additive Slots: sidebar button, full-page Board overlay,
 // per-session Board tab, and per-Workspace Board settings.
@@ -199,8 +199,14 @@ return {
                 className: 'kanban-card-attention kanban-attention-' + card.attention,
                 title: ATTENTION_LABELS[card.attention],
               },
-              ATTENTION_LABELS[card.attention],
+              card.stalled ? 'Stalled' : ATTENTION_LABELS[card.attention],
             ),
+        card.stalled ? h('div', { className: 'kanban-dialog-error', role: 'status' }, card.attentionMessage) : null,
+        card.stalled ? h('div', { className: 'kanban-dialog-actions' },
+          [['resume', 'Resume'], ['retry', 'Retry fresh'], ['sendBack', 'Send back to Ready']].map(([action, label]) =>
+            h('button', { key: action, className: 'kanban-btn', type: 'button',
+              onClick: (event) => { event.stopPropagation(); props.onRecover(card, action) },
+            }, label))) : null,
         card.column === 'in-review'
           ? h(
               'button',
@@ -275,6 +281,7 @@ return {
               onOpenSession: props.onOpenSession,
               onDequeue: props.onDequeue,
               onBounce: props.onBounce,
+              onRecover: props.onRecover,
             }),
           ),
         ),
@@ -474,6 +481,48 @@ return {
       )
     }
 
+    function RecoveryDialog(props) {
+      const [saving, setSaving] = React.useState(false)
+      const [error, setError] = React.useState(null)
+      const [confirmation, setConfirmation] = React.useState(null)
+      const labels = { resume: 'Resume', retry: 'Retry fresh', sendBack: 'Send back to Ready' }
+      const label = labels[props.action]
+      const descriptions = {
+        resume: 'Continue the same Agent Session in its Worktree.',
+        retry: 'Dispose the stopped Agent Session. Start a new Agent Session in the same Worktree and branch. Keep existing work.',
+        sendBack: 'Remove the clean Worktree, delete its branch, and unlink the Agent Session. Unmerged commits require another confirmation.',
+      }
+      const submit = () => {
+        if (saving) return
+        setSaving(true)
+        setError(null)
+        host.call('ticket.' + props.action, {
+          workspaceId: props.workspaceId, file: props.card.file,
+          confirmation: confirmation ? confirmation.token : null,
+        }).then((reply) => {
+          setSaving(false)
+          if (reply && reply.ok) { props.onSaved(); return }
+          if (reply && reply.confirmationRequired) {
+            setConfirmation({ token: reply.confirmation, message: reply.error })
+          } else {
+            setConfirmation(null)
+            setError((reply && reply.error) || 'Recovery failed')
+          }
+        }, (err) => { setSaving(false); setError(String((err && err.message) || err)) })
+      }
+      return h('div', { className: 'kanban-dialog-backdrop', onKeyDown: (event) => {
+        if (event.key === 'Escape') { event.stopPropagation(); if (!saving) props.onCancel() }
+      } }, h('div', { className: 'kanban-dialog', role: 'dialog', 'aria-modal': true, 'aria-label': label + ' ' + props.card.id },
+        h('div', { className: 'kanban-dialog-title' }, label + ' — ' + props.card.id),
+        h('div', { className: 'kanban-dialog-text' }, descriptions[props.action]),
+        confirmation ? h('div', { className: 'kanban-dialog-error', role: 'alert' }, confirmation.message) : null,
+        error ? h('div', { className: 'kanban-dialog-error', role: 'alert' }, error) : null,
+        h('div', { className: 'kanban-dialog-actions' },
+          h('button', { className: 'kanban-btn', type: 'button', disabled: saving, autoFocus: true, onClick: props.onCancel }, 'Cancel'),
+          h('button', { className: 'kanban-btn kanban-btn-primary', type: 'button', disabled: saving, onClick: submit },
+            saving ? 'Working…' : confirmation ? 'Delete unmerged commits and send back' : label))))
+    }
+
     function Board(props) {
       const workspace = props.workspace
       const [result, setResult] = React.useState(null)
@@ -545,6 +594,10 @@ return {
           setDialog({ mode: 'bounce', card })
           return
         }
+        if (card.stalled && column === 'ready') {
+          setDialog({ mode: 'recovery', card, action: 'sendBack' })
+          return
+        }
         doMove(file, column)
       }
 
@@ -574,6 +627,7 @@ return {
               queuedCount,
               onEditCard: (card) => setDialog({ mode: 'edit', card }),
               onBounce: (card) => setDialog({ mode: 'bounce', card }),
+              onRecover: (card, action) => setDialog({ mode: 'recovery', card, action }),
               onDragStartCard: (file) => setDragFile(file),
               onDragEndCard: () => {
                 setDragFile(null)
@@ -667,7 +721,8 @@ return {
         body,
         dialog === null
           ? null
-          : h(dialog.mode === 'bounce' ? BounceDialog : TicketDialog, {
+          : h(dialog.mode === 'recovery' ? RecoveryDialog : dialog.mode === 'bounce' ? BounceDialog : TicketDialog, {
+              action: dialog.action,
               key: dialog.mode + '-' + (dialog.card ? dialog.card.file : 'new'),
               mode: dialog.mode,
               card: dialog.card,

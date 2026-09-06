@@ -44,18 +44,20 @@ async function kanbanHandleSessionSignal(request, adapter) {
   return { attention, moved }
 }
 
+const KANBAN_STALLED_REASONS = ['error', 'interrupted', 'aborted', 'blocked', 'max-tokens']
+
 function kanbanAttentionForSignal(request) {
   if (request === null || typeof request !== 'object') return undefined
   if (request.signal === 'status') {
     if (request.status !== 'idle') return null
     if (request.reasonKind === 'completed') return 'finished'
-    if (request.reasonKind === 'error' || request.reasonKind === 'interrupted') return 'error'
+    if (KANBAN_STALLED_REASONS.includes(request.reasonKind)) return 'error'
     return null
   }
   if (request.signal === 'turn-end') {
     const kind = request.reason && request.reason.kind
     if (kind === 'completed') return 'finished'
-    if (kind === 'error' || kind === 'interrupted') return 'error'
+    if (KANBAN_STALLED_REASONS.includes(kind)) return 'error'
     return null
   }
   if (request.signal === 'approval-asked') return 'approval'
