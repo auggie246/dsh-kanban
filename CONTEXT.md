@@ -149,6 +149,11 @@ Rejecting a Ticket in In Review. The Ticket returns to In Progress and the
 user's comment is delivered to the same Agent Session as revision
 instructions, in the same Worktree.
 
+### Bounce History
+
+The ordered record of a Ticket's review comments and their timestamps, kept in its Ticket File.
+Description edits do not remove this record.
+
 ## Sync concepts
 
 ### Sync
@@ -203,7 +208,8 @@ queued — see ADR-0005), `blocked`
 (free-text reason, shown as a Blocked badge in any column; empty/absent
 means not Blocked), `issue` (Issue URL, empty when none), `base` (`head` for
 the committed local HEAD override; absent means the remote default branch),
-`branch`, `worktreePath`, and `sessionId` (Agent Session id). Values are
+`branch`, `worktreePath`, `sessionId` (Agent Session id), and `bounces`
+(Bounce History — see ADR-0007). Values are
 scalars on one line; multi-line YAML is not used. Scalars containing `:`, `#`, quotes or
 backslashes are double-quoted with `\"` and `\\` escapes. The
 `<id>-<slug>` file name is fixed at creation: editing the title does not

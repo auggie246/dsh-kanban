@@ -26,7 +26,8 @@
 //   linkageFor(sessionId) → linkage | undefined
 //   linkedTicketColumn(linkage) → column string
 //   branchHasCommits(linkage) → boolean
-//   moveTicketToInReview(linkage) → writes column: in-review
+//   moveTicketToInReview(linkage) → writes column: in-review; false declines
+//     a stale completion after a Bounce or another state change.
 async function kanbanHandleSessionSignal(request, adapter) {
   const sessionId = String((request && request.sessionId) || '')
   const signal = request && request.signal
@@ -36,8 +37,7 @@ async function kanbanHandleSessionSignal(request, adapter) {
     const linkage = await adapter.linkageFor(sessionId)
     if (linkage !== undefined && (await adapter.linkedTicketColumn(linkage)) === 'in-progress') {
       if (await adapter.branchHasCommits(linkage)) {
-        await adapter.moveTicketToInReview(linkage)
-        moved = true
+        moved = (await adapter.moveTicketToInReview(linkage)) !== false
       }
     }
   }

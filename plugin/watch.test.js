@@ -52,6 +52,19 @@ test('an idle session whose turn completed with commits moves its In Progress ti
   assert.deepEqual(moved, ['KAN-101'])
 })
 
+test('a superseded completion reports no move when the serialized transition declines it', async () => {
+  const result = await kanbanHandleSessionSignal(
+    { signal: 'status', sessionId: 'session-review', status: 'idle', reasonKind: 'completed' },
+    {
+      linkageFor: async () => makeLinkage(),
+      linkedTicketColumn: async () => 'in-progress',
+      branchHasCommits: async () => true,
+      moveTicketToInReview: async () => false,
+    },
+  )
+  assert.equal(result.moved, false)
+})
+
 test('a ticket with no commits on its kanban branch does not transition', async () => {
   const linkage = makeLinkage()
   const moves = []

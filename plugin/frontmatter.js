@@ -112,6 +112,7 @@ const KANBAN_KEY_ORDER = [
   'branch',
   'worktreePath',
   'sessionId',
+  'bounces',
 ]
 
 // serializeTicketFile(attrs, body) → the full Ticket File text. Only the

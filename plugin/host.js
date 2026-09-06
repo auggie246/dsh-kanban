@@ -1,7 +1,7 @@
-// Host half of the kanban Plugin — M2 (issue #6, session watch loop).
+// Host half of the kanban Plugin — M2 (issue #7, review Bounce).
 //
 // `cordis_define` receives plugin/frontmatter.js, plugin/settings.js,
-// plugin/queue.js, plugin/execution.js, and plugin/watch.js concatenated
+// plugin/queue.js, plugin/execution.js, plugin/watch.js, and plugin/bounce.js concatenated
 // before this file. Their helpers are in scope. Plain JavaScript only: no
 // imports, no TypeScript, and no Node globals.
 //
@@ -282,6 +282,10 @@ return {
       const card = parseTicketFile(file, loaded.text)
       if (card === null) return { ok: false, error: 'not-a-ticket-file' }
 
+      if (card.column === 'in-review' && column === 'in-progress') {
+        return { ok: false, error: 'bounce-comment-required' }
+      }
+
       // A queued Ticket dropped on In Progress again is already in line.
       if (column === 'in-progress' && kanbanIsQueued(card)) {
         return { ok: true, file, column, queued: true }
@@ -340,6 +344,12 @@ return {
     // in the Ticket Files and the execution linkage table.
     const watchAttention = new Map() // sessionId → 'approval' | 'error' | 'finished'
     const watchLastTurnEnd = new Map() // sessionId → last turn/end reason kind
+    const watchRevision = new Map() // sessionId → generation of the current turn
+    const invalidateWatch = (sessionId) => {
+      watchRevision.set(sessionId, (watchRevision.get(sessionId) || 0) + 1)
+      watchLastTurnEnd.delete(sessionId)
+      watchAttention.delete(sessionId)
+    }
 
     // Locate one Ticket File by its Ticket id. The Ticket File — not the
     // linkage record — is the source of truth for the Ticket's column.
@@ -405,27 +415,33 @@ return {
         if (workspace === undefined) return Promise.resolve(false)
         return kanbanBranchHasCommits(linkage, (args) => watchRunGit(workspace.path, args))
       },
-      async moveTicketToInReview(linkage) {
-        const found = await findTicketByTicketId(linkage.workspaceId, linkage.ticketId)
-        if (found === undefined) return
-        const workspace = registry.get(linkage.workspaceId)
-        if (workspace === undefined) return
-        // The automatic In Review move frees a WIP slot, so it runs through
-        // the same serialized move path as manual moves: moveTicket writes
-        // column: in-review, then pumpQueue spawns the earliest queued
-        // Ticket (ADR-0005). The watch never jumps the move tail.
-        await enqueueMove(() =>
-          moveTicket({ workspaceId: linkage.workspaceId, workspace }, found.file, 'in-review'),
-        )
+      async moveTicketToInReview(linkage, revision) {
+        // Recheck inside the move tail: a Bounce or a new turn may have
+        // invalidated this completion while the branch check was pending.
+        return enqueueMove(async () => {
+          const found = await findTicketByTicketId(linkage.workspaceId, linkage.ticketId)
+          const workspace = registry.get(linkage.workspaceId)
+          if (found === undefined || workspace === undefined ||
+            found.card.column !== 'in-progress' || found.card.sessionId !== linkage.sessionId ||
+            (watchRevision.get(linkage.sessionId) || 0) !== revision) return false
+          const result = await moveTicket(
+            { workspaceId: linkage.workspaceId, workspace }, found.file, 'in-review',
+          )
+          return result.ok
+        })
       },
     }
 
     // Drive one signal through the watch seam. A watch failure must never
     // break the Host event loop, so everything is contained here.
     const forwardWatchSignal = async (request) => {
+      const revision = watchRevision.get(request.sessionId) || 0
       try {
-        const { attention } = await kanbanHandleSessionSignal(request, watchAdapter)
-        if (attention !== undefined) {
+        const { attention } = await kanbanHandleSessionSignal(request, {
+          ...watchAdapter,
+          moveTicketToInReview: (linkage) => watchAdapter.moveTicketToInReview(linkage, revision),
+        })
+        if (attention !== undefined && (watchRevision.get(request.sessionId) || 0) === revision) {
           if (attention === null) watchAttention.delete(request.sessionId)
           else watchAttention.set(request.sessionId, attention)
         }
@@ -461,6 +477,7 @@ return {
       const sessionId = agent && agent.id
       if (sessionId === undefined || sessionId === '') return
       const reasonKind = status === 'idle' ? watchLastTurnEnd.get(sessionId) : undefined
+      if (status === 'running') invalidateWatch(sessionId)
       if (status === 'idle') watchLastTurnEnd.delete(sessionId)
       void forwardWatchSignal({ signal: 'status', sessionId, status, reasonKind })
     })
@@ -603,18 +620,56 @@ return {
         if (title === '') return { ok: false, error: 'title required' }
         const dirPath = ticketsDir(workspaceLookup.workspace)
         try {
-          const loaded = await readTicket(dirPath, String((args && args.file) || ''))
-          if (loaded.error !== undefined) return { ok: false, error: loaded.error }
-          const blocked = String((args && args.blocked) || '').trim()
-          let text = kanbanSetAttr(loaded.text, 'title', title)
-          text = kanbanSetAttr(text, 'blocked', blocked === '' ? null : blocked)
-          text = kanbanSetAttr(text, 'base', args && args.base === 'head' ? 'head' : null)
-          text = kanbanSetBody(text, String((args && args.body) || ''))
-          if (text === null) return { ok: false, error: 'not-a-ticket-file' }
-          await fs.writeText(loaded.target, text)
-          return { ok: true, file: String(args.file) }
+          // Share the move tail so a description edit cannot overwrite a
+          // concurrent Bounce's column or history with an earlier file read.
+          return await enqueueMove(async () => {
+            const loaded = await readTicket(dirPath, String((args && args.file) || ''))
+            if (loaded.error !== undefined) return { ok: false, error: loaded.error }
+            const blocked = String((args && args.blocked) || '').trim()
+            let text = kanbanSetAttr(loaded.text, 'title', title)
+            text = kanbanSetAttr(text, 'blocked', blocked === '' ? null : blocked)
+            text = kanbanSetAttr(text, 'base', args && args.base === 'head' ? 'head' : null)
+            text = kanbanSetBody(text, String((args && args.body) || ''))
+            if (text === null) return { ok: false, error: 'not-a-ticket-file' }
+            await fs.writeText(loaded.target, text)
+            return { ok: true, file: String(args.file) }
+          })
         } catch (err) {
           return { ok: false, error: 'ticket-update-failed: ' + String((err && err.message) || err) }
+        }
+      }),
+    )
+
+    let bounceSequence = 0
+    ctx.effect(() =>
+      harness.handle('ticket.bounce', async (args) => {
+        const workspaceLookup = workspaceOf(args)
+        if (workspaceLookup.workspace === undefined) return { ok: false, error: workspaceLookup.error }
+        const file = String((args && args.file) || '')
+        try {
+          return await enqueueMove(async () => {
+            const loaded = await readTicket(ticketsDir(workspaceLookup.workspace), file)
+            if (loaded.error !== undefined) return { ok: false, error: loaded.error }
+            const at = new Date().toISOString()
+            const result = await kanbanBounceTicket(
+              { file, ticketText: loaded.text, comment: args && args.comment, at },
+              {
+                liveAgent: (sessionId) => agents.get(sessionId),
+                persistTicket: (text) => fs.writeText(loaded.target, text),
+                steer(agent, comment) {
+                  agent.steer({
+                    id: 'kanban-bounce-' + agent.id + '-' + at + '-' + (++bounceSequence),
+                    role: 'user',
+                    content: [{ type: 'text', text: comment }],
+                  })
+                  invalidateWatch(agent.id)
+                },
+              },
+            )
+            return { ok: true, ...result }
+          })
+        } catch (err) {
+          return { ok: false, error: 'ticket-bounce-failed: ' + String((err && err.message) || err) }
         }
       }),
     )

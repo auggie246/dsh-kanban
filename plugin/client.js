@@ -1,4 +1,4 @@
-// Client half of the kanban Plugin — M2 (issue #6, attention badges).
+// Client half of the kanban Plugin — M2 (issue #7, review Bounce).
 //
 // Registers four additive Slots: sidebar button, full-page Board overlay,
 // per-session Board tab, and per-Workspace Board settings.
@@ -201,6 +201,21 @@ return {
               },
               ATTENTION_LABELS[card.attention],
             ),
+        card.column === 'in-review'
+          ? h(
+              'button',
+              {
+                className: 'kanban-btn kanban-card-reject',
+                type: 'button',
+                title: 'Reject with a review comment',
+                onClick: (event) => {
+                  event.stopPropagation()
+                  props.onBounce(card)
+                },
+              },
+              'Reject',
+            )
+          : null,
         card.sessionId === ''
           ? null
           : h(
@@ -259,6 +274,7 @@ return {
               onDragEnd: props.onDragEndCard,
               onOpenSession: props.onOpenSession,
               onDequeue: props.onDequeue,
+              onBounce: props.onBounce,
             }),
           ),
         ),
@@ -391,12 +407,79 @@ return {
       )
     }
 
+    function BounceDialog(props) {
+      const [comment, setComment] = React.useState('')
+      const [saving, setSaving] = React.useState(false)
+      const [error, setError] = React.useState(null)
+      const submit = () => {
+        if (saving) return
+        if (comment.trim() === '') {
+          setError('A review comment is required.')
+          return
+        }
+        setSaving(true)
+        setError(null)
+        host.call('ticket.bounce', {
+          workspaceId: props.workspaceId, file: props.card.file, comment,
+        }).then(
+          (reply) => {
+            setSaving(false)
+            if (reply && reply.ok) props.onSaved()
+            else setError((reply && reply.error) || 'ticket.bounce failed')
+          },
+          (err) => {
+            setSaving(false)
+            setError(String((err && err.message) || err))
+          },
+        )
+      }
+      return h(
+        'div',
+        {
+          className: 'kanban-dialog-backdrop',
+          onKeyDown: (event) => {
+            if (event.key === 'Escape') {
+              event.stopPropagation()
+              if (!saving) props.onCancel()
+            }
+          },
+        },
+        h(
+          'div',
+          { className: 'kanban-dialog', role: 'dialog', 'aria-modal': true, 'aria-label': 'Reject ' + props.card.id },
+          h('div', { className: 'kanban-dialog-title' }, 'Reject ' + props.card.id),
+          h('div', { className: 'kanban-dialog-text' },
+            'Your comment returns this Ticket to In Progress in the same Agent Session and Worktree.'),
+          h(
+            'label',
+            { className: 'kanban-field' },
+            h('span', { className: 'kanban-field-label' }, 'Review comment'),
+            h('textarea', {
+              className: 'kanban-textarea', value: comment, autoFocus: true, disabled: saving,
+              placeholder: 'Explain what needs to change.',
+              onChange: (event) => setComment(event.target.value),
+            }),
+          ),
+          error === null ? null : h('div', { className: 'kanban-dialog-error', role: 'alert' }, error),
+          h(
+            'div',
+            { className: 'kanban-dialog-actions' },
+            h('button', { className: 'kanban-btn', type: 'button', disabled: saving, onClick: props.onCancel }, 'Cancel'),
+            h('button', {
+              className: 'kanban-btn kanban-btn-primary', type: 'button',
+              disabled: saving || comment.trim() === '', onClick: submit,
+            }, saving ? 'Sending…' : 'Send back to In Progress'),
+          ),
+        ),
+      )
+    }
+
     function Board(props) {
       const workspace = props.workspace
       const [result, setResult] = React.useState(null)
       const [error, setError] = React.useState(null)
       const [loading, setLoading] = React.useState(false)
-      const [dialog, setDialog] = React.useState(null) // {mode:'create'} | {mode:'edit', card}
+      const [dialog, setDialog] = React.useState(null) // {mode:'create'} | {mode:'edit'|'bounce', card}
       const [dragFile, setDragFile] = React.useState(null)
       const [dragOverColumn, setDragOverColumn] = React.useState(null)
       const [moveError, setMoveError] = React.useState(null)
@@ -458,6 +541,10 @@ return {
       const requestMove = (file, column) => {
         const card = tickets.find((ticket) => ticket.file === file)
         if (card === undefined || card.column === column) return
+        if (card.column === 'in-review' && column === 'in-progress') {
+          setDialog({ mode: 'bounce', card })
+          return
+        }
         doMove(file, column)
       }
 
@@ -486,6 +573,7 @@ return {
               runningCount,
               queuedCount,
               onEditCard: (card) => setDialog({ mode: 'edit', card }),
+              onBounce: (card) => setDialog({ mode: 'bounce', card }),
               onDragStartCard: (file) => setDragFile(file),
               onDragEndCard: () => {
                 setDragFile(null)
@@ -579,7 +667,8 @@ return {
         body,
         dialog === null
           ? null
-          : h(TicketDialog, {
+          : h(dialog.mode === 'bounce' ? BounceDialog : TicketDialog, {
+              key: dialog.mode + '-' + (dialog.card ? dialog.card.file : 'new'),
               mode: dialog.mode,
               card: dialog.card,
               workspaceId,
@@ -833,6 +922,7 @@ return {
       '.kanban-card-session{display:inline-block;margin-top:7px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-brand-primary);text-decoration:none;}',
       '.kanban-card-session:hover{text-decoration:underline;}',
+      '.kanban-card-reject{display:block;margin-top:8px;}',
       '.kanban-card-blocked{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-state-error-primary);border:1px solid var(--dsw-alias-state-error-primary);',
       'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
