@@ -4,7 +4,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { kanbanStartTicketExecution } = require('./execution.js')
+const { kanbanStartTicketExecution, kanbanExecutionBrief } = require('./execution.js')
 const { kanbanSetAttr, parseTicketFile } = require('./frontmatter.js')
 
 function git(cwd, ...args) {
@@ -73,6 +73,32 @@ function makeAdapter(workspace) {
     },
   }
 }
+
+test('a GitHub completion brief requires a pushed Ticket branch and linked Issue PR', () => {
+  const brief = kanbanExecutionBrief(
+    '---\nid: KAN-101\nissue: https://github.com/owner/repo/issues/10\n---\nFix it.\n',
+    'kanban/KAN-101-fix', '/workspace', '/workspace/.dsh-kanban/worktrees/fix',
+    { platform: 'github', remote: 'origin' },
+  )
+  assert.match(brief, /git push -u origin kanban\/KAN-101-fix/)
+  assert.match(brief, /gh pr create/)
+  assert.match(brief, /https:\/\/github\.com\/owner\/repo\/issues\/10/)
+})
+
+test('a GitLab completion brief requires a pushed Ticket branch and MR', () => {
+  const brief = kanbanExecutionBrief(
+    '---\nid: KAN-102\n---\nFix it.\n', 'kanban/KAN-102-fix', '/workspace', '/workspace/wt',
+    { platform: 'gitlab', remote: 'upstream' },
+  )
+  assert.match(brief, /git push -u upstream kanban\/KAN-102-fix/)
+  assert.match(brief, /glab mr create/)
+  assert.doesNotMatch(brief, /linked Issue/)
+})
+
+test('a local completion brief does not require a push or change request', () => {
+  const brief = kanbanExecutionBrief('---\nid: KAN-103\n---\nFix it.\n', 'kanban/KAN-103-fix', '/workspace', '/workspace/wt', { platform: 'none' })
+  assert.doesNotMatch(brief, /git push|gh pr create|glab mr create/)
+})
 
 test('moving a Ready Ticket starts isolated work from the remote default branch', async (t) => {
   const repo = makeRepository()

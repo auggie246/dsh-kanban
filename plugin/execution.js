@@ -31,15 +31,26 @@ function kanbanEnsureIgnoreLine(text, line) {
   return next + line + '\n'
 }
 
-function kanbanExecutionBrief(ticketText, branch, workspacePath, worktreePath) {
-  return [
-    'Complete the Ticket below.',
-    '',
-    'Board rules:',
+function kanbanExecutionBrief(ticketText, branch, workspacePath, worktreePath, remote) {
+  const rules = [
     '- Work only on branch `' + branch + '`.',
     '- Work only inside the Worktree `' + worktreePath + '`.',
     '- Never touch the main checkout `' + workspacePath + '`.',
     '- Commit completed work to `' + branch + '`.',
+  ]
+  if (remote && (remote.platform === 'github' || remote.platform === 'gitlab')) {
+    rules.push('- Push the Ticket branch with `git push -u ' + remote.remote + ' ' + branch + '`.')
+    rules.push(remote.platform === 'github'
+      ? '- Create its GitHub PR with `gh pr create` after pushing.'
+      : '- Create its GitLab MR with `glab mr create` after pushing.')
+    const match = /^\s*issue:\s*["']?([^\s"']+)["']?\s*$/mi.exec(String(ticketText || ''))
+    if (match) rules.push('- Reference the linked Issue `' + match[1] + '` in the PR/MR description.')
+  }
+  return [
+    'Complete the Ticket below.',
+    '',
+    'Board rules:',
+    ...rules,
     '',
     'Ticket File:',
     '',
@@ -47,20 +58,25 @@ function kanbanExecutionBrief(ticketText, branch, workspacePath, worktreePath) {
   ].join('\n')
 }
 
-// One Host Git boundary shared by execution, watching, and completion.
-async function kanbanRunHostGit(shell, workdir, args, options = {}) {
+// One Host command boundary shared by Git and remote platform CLIs.
+async function kanbanRunHostCommand(shell, workdir, args, options = {}) {
   const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'"
   const result = await shell.run(shell.resolve({
-    command: ['git', ...args].map(quote).join(' '),
+    command: args.map(quote).join(' '),
     workdir,
     timeoutMs: options.timeoutMs || 30000,
     stdoutMaxBytes: options.stdoutMaxBytes || 262144,
   }))
   const allowed = options.allowedExitCodes || [0]
   if (!allowed.includes(result.exitCode)) {
-    throw new Error(result.stderr.text.trim() || result.stdout.text.trim() || 'git command failed')
+    throw new Error(result.stderr.text.trim() || result.stdout.text.trim() || 'command failed')
   }
   return { exitCode: result.exitCode, text: result.stdout.text, truncated: result.stdout.truncated === true }
+}
+
+// One Host Git boundary shared by execution, watching, and completion.
+function kanbanRunHostGit(shell, workdir, args, options = {}) {
+  return kanbanRunHostCommand(shell, workdir, ['git', ...args], options)
 }
 
 // Bind the dynamic Host capabilities to the Ticket execution interface.
@@ -72,6 +88,8 @@ function kanbanHostExecutionAdapter(deps) {
   }
   return {
     runGit,
+    detectRemote: () => kanbanDetectRemote((args, allowed = [0]) =>
+      kanbanRunHostGit(deps.shell, deps.workspace.path, args, { allowedExitCodes: allowed, timeoutMs: 30000 })),
     async readIgnore() {
       const target = await deps.fs.resolve(workspacePath + '/.gitignore')
       const info = await deps.fs.stat(target)
@@ -184,6 +202,8 @@ async function kanbanStartTicketExecution(request, adapter) {
   const nextIgnore = kanbanEnsureIgnoreLine(ignore, KANBAN_WORKTREE_IGNORE)
   if (nextIgnore !== ignore) await adapter.writeIgnore(nextIgnore)
   const localOnly = String(await adapter.runGit(['remote'])).trim() === ''
+  const completionRemote = typeof adapter.detectRemote === 'function'
+    ? await adapter.detectRemote() : { platform: 'none', remote: '', url: '' }
   const baseRef = input.baseMode === 'head' || localOnly ? 'HEAD' : await kanbanRemoteDefault(adapter)
   if (localOnly) {
     const baseBranch = String(await adapter.runGit(['symbolic-ref', '--short', 'HEAD'])).trim()
@@ -202,7 +222,7 @@ async function kanbanStartTicketExecution(request, adapter) {
     ticketPersisted = true
     await adapter.persistLinkage(linkageKey, linkage)
     linkagePersisted = true
-    await adapter.followup(session, kanbanExecutionBrief(input.ticketText, branch, input.workspacePath, worktreePath))
+    await adapter.followup(session, kanbanExecutionBrief(input.ticketText, branch, input.workspacePath, worktreePath, completionRemote))
     return linkage
   } catch (error) {
     const cleanupErrors = []

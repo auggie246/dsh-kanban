@@ -207,6 +207,12 @@ return {
         h('div', { className: 'kanban-card-head' }, h('span', { className: 'kanban-card-id' }, card.id)),
         h('div', { className: 'kanban-card-title' }, card.title),
         card.preview === '' ? null : h('div', { className: 'kanban-card-preview' }, card.preview),
+        card.reviewUrl === ''
+          ? null
+          : h('a', {
+              className: 'kanban-card-review-link', href: card.reviewUrl, target: '_blank', rel: 'noreferrer',
+              onClick: (event) => event.stopPropagation(),
+            }, 'Open PR/MR'),
         card.blocked === ''
           ? null
           : h('div', { className: 'kanban-card-blocked', title: card.blocked }, 'Blocked — ' + card.blocked),

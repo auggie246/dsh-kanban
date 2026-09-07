@@ -543,12 +543,83 @@ return {
       }),
     )
 
+    const completionGit = (workspace) => (args, allowed = [0]) =>
+      kanbanRunHostGit(shell, workspace.path, args, { allowedExitCodes: allowed })
+    const remotePollState = new Map()
+    let remoteSweepRunning
+    const pollRemoteTickets = () => {
+      if (remoteSweepRunning !== undefined) return remoteSweepRunning
+      remoteSweepRunning = (async () => {
+        const now = Date.now()
+        for (const workspace of registry.list()) {
+          const workspaceId = String(workspace.id)
+          const lookup = { workspaceId, workspace }
+          let remote
+          try { remote = await kanbanDetectRemote(completionGit(workspace)) } catch (err) {
+            console.error('kanban remote detection failed: ' + String((err && err.message) || err))
+            continue
+          }
+          if (remote.platform === 'none') continue
+          const command = (args, allowed = [0]) => kanbanRunHostCommand(shell, workspace.path, args, {
+            allowedExitCodes: allowed, timeoutMs: 30000, stdoutMaxBytes: 262144,
+          })
+          const platform = kanbanRemotePlatformAdapter(remote, command)
+          for (const card of await readBoardCards(lookup)) {
+            if (card.column !== 'in-review' || card.branch === '' || card.worktreePath === '') continue
+            const key = workspaceId + '/' + card.id + '/' + card.sessionId + '/' + card.branch
+            const state = remotePollState.get(key) || { attempt: 0, nextAt: 0 }
+            if (state.nextAt > now) continue
+            try {
+              const result = await enqueueMove(async () => {
+                const loaded = await readTicket(ticketsDir(workspace), card.file)
+                if (loaded.error !== undefined) throw new Error(loaded.error)
+                const current = parseTicketFile(card.file, loaded.text)
+                if (!current || current.column !== 'in-review' || current.branch !== card.branch ||
+                    current.sessionId !== card.sessionId) return { stale: true }
+                const agent = agents.get(current.sessionId)
+                if (agent !== undefined && agent.status !== 'idle') throw new Error('session-not-idle')
+                const handle = sessionHandles.get(current.sessionId)
+                if (agent !== undefined && (!handle || handle.agent !== agent)) throw new Error('session-not-owned-by-board')
+                const completed = await kanbanCompleteRemoteTicket({
+                  file: card.file, text: loaded.text, workspacePath: workspace.path,
+                }, {
+                  parseTicketFile,
+                  setTicketAttr: kanbanSetAttr,
+                  review: (branch) => platform.review(branch),
+                  git: completionGit(workspace),
+                  persistTicket: (text) => fs.writeText(loaded.target, text),
+                  async releaseSession() {
+                    if (!handle) return
+                    await handle.dispose()
+                    sessionHandles.delete(current.sessionId)
+                  },
+                })
+                if (completed.merged) {
+                  await executionTable.delete(workspaceId + '/' + current.id)
+                  invalidateWatch(current.sessionId)
+                  await pumpQueue(lookup).catch(logPumpFailure)
+                }
+                return completed
+              })
+              if (result.merged || result.stale) remotePollState.delete(key)
+              else remotePollState.set(key, { attempt: state.attempt + 1, nextAt: now + kanbanRemotePollDelay(state.attempt) })
+            } catch (err) {
+              remotePollState.set(key, { attempt: state.attempt + 1, nextAt: now + kanbanRemotePollDelay(state.attempt) })
+              console.error('kanban remote completion failed for ' + card.id + ': ' + String((err && err.message) || err))
+            }
+          }
+        }
+      })().finally(() => { remoteSweepRunning = undefined })
+      return remoteSweepRunning
+    }
+
     // board.watch.list() → the live Attention Badge aggregate across every
     // registered Workspace's linked Tickets. The sidebar Kanban button polls
-    // this while the Board is closed; the reply is owned plain JSON.
+    // this while the Board is closed; the same poll checks remote PR/MR state.
     ctx.effect(() =>
       harness.handle('board.watch.list', async () => {
         try {
+          await pollRemoteTickets()
           const tickets = []
           for (const workspace of registry.list()) {
             const workspaceId = String(workspace.id)
@@ -745,8 +816,6 @@ return {
       }),
     )
 
-    const completionGit = (workspace) => (args, allowed = [0]) =>
-      kanbanRunHostGit(shell, workspace.path, args, { allowedExitCodes: allowed })
     ctx.effect(() => harness.handle('ticket.review', async (args) => {
       const lookup = workspaceOf(args)
       if (!lookup.workspace) return { ok: false, error: lookup.error }

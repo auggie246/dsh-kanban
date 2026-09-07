@@ -511,6 +511,26 @@ test('overlapping Bounce submissions deliver only one review comment', async (t)
   assert.doesNotMatch(board.files.get(ticketPath), /Duplicate submission/)
 })
 
+test('the Board watch poll captures an open GitHub PR URL on its Ticket', async (t) => {
+  const board = await openBoard(t, {
+    missingSession: true,
+    runGit(request) {
+      const command = request.command
+      let text = ''
+      if (command === "'git' 'remote'") text = 'origin\n'
+      else if (command.includes("'remote' 'get-url' 'origin'")) text = 'git@github.com:owner/repo.git\n'
+      else if (command.startsWith("'gh' 'pr' 'view'")) {
+        text = '{"url":"https://github.com/owner/repo/pull/7","state":"OPEN","mergedAt":null}'
+      }
+      return { exitCode: 0, stdout: { text, truncated: false }, stderr: { text: '', truncated: false } }
+    },
+  })
+  const reply = await board.call('board.watch.list')
+  assert.equal(reply.ok, true, reply.error)
+  assert.match(board.files.get(ticketPath), /reviewUrl: "https:\/\/github.com\/owner\/repo\/pull\/7"/)
+  assert.match(board.files.get(ticketPath), /column: in-review/)
+})
+
 test('Bounce validation and delivery failures leave the Ticket File unchanged', async (t) => {
   const cases = [
     { args: { comment: ' \n ' }, error: /comment required/ },

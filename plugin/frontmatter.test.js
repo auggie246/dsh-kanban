@@ -10,6 +10,14 @@ const {
   kanbanSetBody,
 } = require('./frontmatter.js')
 
+test('Ticket Files preserve the remote PR or MR URL through description edits', () => {
+  const reviewUrl = 'https://github.com/owner/repo/pull/12'
+  const text = serializeTicketFile({ id: 'KAN-110', title: 'Remote completion', column: 'in-review', reviewUrl }, 'Finished.\n')
+  assert.equal(parseTicketFile('KAN-110-remote-completion.md', text).reviewUrl, reviewUrl)
+  const edited = kanbanSetBody(text, 'Updated description.')
+  assert.equal(parseTicketFile('KAN-110-remote-completion.md', edited).reviewUrl, reviewUrl)
+})
+
 test('Ticket Files preserve the base branch and local merge SHA', () => {
   const mergeSha = 'a'.repeat(40)
   const text = serializeTicketFile({ id: 'KAN-101', title: 'Local completion', column: 'done', baseBranch: 'main', mergeSha }, 'Finished.\n')

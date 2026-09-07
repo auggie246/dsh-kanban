@@ -68,7 +68,9 @@ the Ticket's branch; a PR/MR when the Workspace has a GitHub/GitLab remote,
 local commits otherwise). Nothing moves until the user accepts or bounces it.
 For a Workspace without a remote, the Board shows the Ticket branch diff against its Base Branch.
 Accept merges locally, records the Merge Sha, removes the Worktree and branch, then moves the Ticket to Done.
-A merge conflict disables Accept and appears on the Ticket.
+A merge conflict disables Accept and appears on the Ticket. For a GitHub or GitLab Workspace, the
+Agent Session pushes its branch and opens a PR/MR. The Board records the PR/MR URL and polls its state.
+A merged PR/MR moves the Ticket to Done and removes local execution resources without user action.
 Bouncing returns the Ticket to In Progress with the user's comment fed back
 to the same Agent Session as revision instructions. The Watch Loop moves a
 Ticket here without user action: when the Ticket's Agent Session idles after
@@ -221,8 +223,9 @@ Frontmatter keys: `id` (KAN-<n>), `title`, `column` (one of `backlog`,
 instant the Ticket was queued past the WIP limit; empty/absent means not
 queued — see ADR-0005), `blocked`
 (free-text reason, shown as a Blocked badge in any column; empty/absent
-means not Blocked), `issue` (Issue URL, empty when none), `base` (`head` for
-the committed local HEAD override; absent means the remote default branch),
+means not Blocked), `issue` (Issue URL, empty when none), `reviewUrl` (the
+remote PR/MR URL), `base` (`head` for the committed local HEAD override;
+absent means the remote default branch),
 `branch`, `worktreePath`, `sessionId` (Agent Session id), `bounces`
 (Bounce History — see ADR-0007), `baseBranch` (Base Branch for local completion),
 and `mergeSha` (Merge Sha after local Accept). Values are
