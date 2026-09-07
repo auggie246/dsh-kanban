@@ -109,10 +109,12 @@ const KANBAN_KEY_ORDER = [
   'blocked',
   'issue',
   'base',
+  'baseBranch',
   'branch',
   'worktreePath',
   'sessionId',
   'bounces',
+  'mergeSha',
 ]
 
 // serializeTicketFile(attrs, body) → the full Ticket File text. Only the
@@ -208,6 +210,8 @@ function parseTicketFile(fileName, text) {
     issue: (fm.attrs.issue || '').trim(),
     base: fm.attrs.base === 'head' ? 'head' : 'remote',
     branch: (fm.attrs.branch || '').trim(),
+    baseBranch: (fm.attrs.baseBranch || '').trim(),
+    mergeSha: (fm.attrs.mergeSha || '').trim(),
     worktreePath: (fm.attrs.worktreePath || fm.attrs.worktree || '').trim(),
     sessionId: (fm.attrs.sessionId || fm.attrs.session || '').trim(),
     body: fm.body,

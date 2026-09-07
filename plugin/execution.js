@@ -25,7 +25,7 @@ function kanbanExecutionInput(request) {
 
 function kanbanEnsureIgnoreLine(text, line) {
   const lines = String(text || '').split(/\r?\n/)
-  if (lines.includes(line)) return String(text || '')
+  if (lines.includes(line) || (line === KANBAN_WORKTREE_IGNORE && lines.includes('.dsh-kanban/'))) return String(text || '')
   let next = String(text || '')
   if (next !== '' && !next.endsWith('\n')) next += '\n'
   return next + line + '\n'
@@ -47,24 +47,28 @@ function kanbanExecutionBrief(ticketText, branch, workspacePath, worktreePath) {
   ].join('\n')
 }
 
+// One Host Git boundary shared by execution, watching, and completion.
+async function kanbanRunHostGit(shell, workdir, args, options = {}) {
+  const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'"
+  const result = await shell.run(shell.resolve({
+    command: ['git', ...args].map(quote).join(' '),
+    workdir,
+    timeoutMs: options.timeoutMs || 30000,
+    stdoutMaxBytes: options.stdoutMaxBytes || 262144,
+  }))
+  const allowed = options.allowedExitCodes || [0]
+  if (!allowed.includes(result.exitCode)) {
+    throw new Error(result.stderr.text.trim() || result.stdout.text.trim() || 'git command failed')
+  }
+  return { exitCode: result.exitCode, text: result.stdout.text, truncated: result.stdout.truncated === true }
+}
+
 // Bind the dynamic Host capabilities to the Ticket execution interface.
 function kanbanHostExecutionAdapter(deps) {
   const workspacePath = deps.workspace.path.replace(/\/+$/, '')
-  const shellQuote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'"
   const runGit = async (args) => {
-    const result = await deps.shell.run(
-      deps.shell.resolve({
-        command: ['git', ...args].map(shellQuote).join(' '),
-        workdir: deps.workspace.path,
-        timeoutMs: 120000,
-        stdoutMaxBytes: 262144,
-      }),
-    )
-    if (result.exitCode !== 0) {
-      const detail = result.stderr.text.trim() || result.stdout.text.trim() || 'git command failed'
-      throw new Error(detail)
-    }
-    return result.stdout.text.trim()
+    const result = await kanbanRunHostGit(deps.shell, deps.workspace.path, args, { timeoutMs: 120000 })
+    return result.text.trim()
   }
   return {
     runGit,
@@ -179,7 +183,12 @@ async function kanbanStartTicketExecution(request, adapter) {
   const ignore = await adapter.readIgnore()
   const nextIgnore = kanbanEnsureIgnoreLine(ignore, KANBAN_WORKTREE_IGNORE)
   if (nextIgnore !== ignore) await adapter.writeIgnore(nextIgnore)
-  const baseRef = input.baseMode === 'head' ? 'HEAD' : await kanbanRemoteDefault(adapter)
+  const localOnly = String(await adapter.runGit(['remote'])).trim() === ''
+  const baseRef = input.baseMode === 'head' || localOnly ? 'HEAD' : await kanbanRemoteDefault(adapter)
+  if (localOnly) {
+    const baseBranch = String(await adapter.runGit(['symbolic-ref', '--short', 'HEAD'])).trim()
+    linkedTicketText = adapter.setTicketAttr(linkedTicketText, 'baseBranch', baseBranch)
+  }
   linkage.baseSha = await adapter.runGit(['rev-parse', baseRef])
   let worktreeCreated = false
   let session

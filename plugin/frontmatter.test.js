@@ -10,6 +10,16 @@ const {
   kanbanSetBody,
 } = require('./frontmatter.js')
 
+test('Ticket Files preserve the base branch and local merge SHA', () => {
+  const mergeSha = 'a'.repeat(40)
+  const text = serializeTicketFile({ id: 'KAN-101', title: 'Local completion', column: 'done', baseBranch: 'main', mergeSha }, 'Finished.\n')
+  const card = parseTicketFile('KAN-101-local-completion.md', text)
+  assert.equal(card.baseBranch, 'main')
+  assert.equal(card.mergeSha, mergeSha)
+  const edited = kanbanSetBody(text, 'Updated description.')
+  assert.equal(parseTicketFile('KAN-101-local-completion.md', edited).mergeSha, mergeSha)
+})
+
 test('columns are exactly the five Board columns in order', () => {
   assert.deepEqual(KANBAN_COLUMNS, ['backlog', 'ready', 'in-progress', 'in-review', 'done'])
 })

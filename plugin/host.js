@@ -1,8 +1,8 @@
 // Host half of the kanban Plugin — execution, review Bounce, and Stalled recovery.
 //
 // `cordis_define` receives plugin/frontmatter.js, plugin/settings.js,
-// plugin/queue.js, plugin/execution.js, plugin/watch.js, and plugin/bounce.js concatenated
-// before this file. Their helpers are in scope. Plain JavaScript only: no
+// plugin/queue.js, plugin/execution.js, plugin/watch.js, plugin/bounce.js, and
+// plugin/completion.js concatenate before this file. Their helpers are in scope. Plain JavaScript only: no
 // imports, no TypeScript, and no Node globals.
 //
 // Write behaviour: every Ticket File write goes through the fs service's
@@ -291,8 +291,10 @@ return {
         return { ok: false, error: 'send-back-required' }
       }
 
-      if (card.column === 'in-review' && column === 'in-progress') {
-        return { ok: false, error: 'bounce-comment-required' }
+      if (card.column === 'in-review' && column !== 'in-review') {
+        if (column === 'done') return { ok: false, error: 'accept-required' }
+        if (column === 'in-progress') return { ok: false, error: 'bounce-comment-required' }
+        return { ok: false, error: 'review-decision-required' }
       }
 
       // A queued Ticket dropped on In Progress again is already in line.
@@ -399,19 +401,9 @@ return {
       return undefined
     }
 
-    const watchRunGit = (workdir, args) => {
-      const result = shell.run(
-        shell.resolve({
-          command: args.map((arg) => "'" + String(arg).replace(/'/g, "'\\''") + "'").join(' '),
-          workdir,
-          timeoutMs: 30000,
-          stdoutMaxBytes: 65536,
-        }),
-      )
-      return result.then((run) => {
-        if (run.exitCode !== 0) throw new Error(run.stderr.text.trim() || 'git command failed')
-        return run.stdout.text.trim()
-      })
+    const watchRunGit = async (workdir, args) => {
+      const result = await kanbanRunHostGit(shell, workdir, args, { stdoutMaxBytes: 65536 })
+      return result.text.trim()
     }
 
     // Bind the dynamic Host capabilities to the Board session-watch seam
@@ -434,7 +426,7 @@ return {
       branchHasCommits: (linkage) => {
         const workspace = registry.get(linkage.workspaceId)
         if (workspace === undefined) return Promise.resolve(false)
-        return kanbanBranchHasCommits(linkage, (args) => watchRunGit(workspace.path, ['git', ...args]))
+        return kanbanBranchHasCommits(linkage, (args) => watchRunGit(workspace.path, args))
       },
       async moveTicketToInReview(linkage, revision) {
         // Recheck inside the move tail: a Bounce or a new turn may have
@@ -675,6 +667,54 @@ return {
       }),
     )
 
+    const completionGit = (workspace) => (args, allowed = [0]) =>
+      kanbanRunHostGit(shell, workspace.path, args, { allowedExitCodes: allowed })
+    ctx.effect(() => harness.handle('ticket.review', async (args) => {
+      const lookup = workspaceOf(args)
+      if (!lookup.workspace) return { ok: false, error: lookup.error }
+      try {
+        return await enqueueMove(async () => {
+          const file = String((args && args.file) || '')
+          const loaded = await readTicket(ticketsDir(lookup.workspace), file)
+          if (loaded.error) throw new Error(loaded.error)
+          return { ok: true, ...await kanbanLocalReview({ file, text: loaded.text, workspacePath: lookup.workspace.path }, completionGit(lookup.workspace)) }
+        })
+      } catch (error) { return { ok: false, error: 'ticket-review-failed: ' + String(error.message || error) } }
+    }))
+
+    ctx.effect(() => harness.handle('ticket.accept', async (args) => {
+      const lookup = workspaceOf(args)
+      if (!lookup.workspace) return { ok: false, error: lookup.error }
+      try {
+        return await enqueueMove(async () => {
+          const file = String((args && args.file) || '')
+          const loaded = await readTicket(ticketsDir(lookup.workspace), file)
+          if (loaded.error) throw new Error(loaded.error)
+          const card = parseTicketFile(file, loaded.text)
+          const agent = agents.get(card.sessionId)
+          let handle
+          if (agent !== undefined) {
+            if (agent.status !== 'idle') throw new Error('session-not-idle')
+            handle = sessionHandles.get(card.sessionId)
+            if (!handle || handle.agent !== agent) throw new Error('session-not-owned-by-board')
+          }
+          const result = await kanbanAcceptLocalTicket({ file, text: loaded.text, workspacePath: lookup.workspace.path, review: args.review }, {
+            git: completionGit(lookup.workspace),
+            persistTicket: (text) => fs.writeText(loaded.target, text),
+            async releaseSession() {
+              if (!handle) return
+              await handle.dispose()
+              sessionHandles.delete(card.sessionId)
+            },
+          })
+          await executionTable.delete(lookup.workspaceId + '/' + card.id)
+          invalidateWatch(card.sessionId)
+          await pumpQueue(lookup).catch(logPumpFailure)
+          return { ok: true, ...result }
+        })
+      } catch (error) { return { ok: false, error: 'ticket-accept-failed: ' + String(error.message || error) } }
+    }))
+
     let recoverySequence = 0
     const recoveryTicket = async (workspaceLookup, file) => {
       const loaded = await readTicket(ticketsDir(workspaceLookup.workspace), file)
@@ -735,7 +775,7 @@ return {
         return await enqueueMove(async () => {
           const file = String((args && args.file) || '')
           const { loaded, card, agent } = await recoveryTicket(lookup, file)
-          const git = (args) => watchRunGit(lookup.workspace.path, ['git', '-C', card.worktreePath, ...args])
+          const git = (args) => watchRunGit(lookup.workspace.path, ['-C', card.worktreePath, ...args])
           if (await git(['rev-parse', '--show-toplevel']) !== card.worktreePath ||
               await git(['symbolic-ref', '--short', 'HEAD']) !== card.branch) throw new Error('worktree-linkage-mismatch')
           if (agent && (agents.get(card.sessionId) !== agent || agent.status !== 'idle')) throw new Error('session-not-idle')
@@ -795,7 +835,7 @@ return {
           const root = lookup.workspace.path.replace(/\/+$/, '')
           const handle = agent && sessionHandles.get(card.sessionId)
           if (agent && (!handle || handle.agent !== agent)) throw new Error('session-not-owned-by-board')
-          const git = (args) => watchRunGit(root, ['git', ...args])
+          const git = (args) => watchRunGit(root, args)
           const worktree = ['-C', card.worktreePath]
           if (await git([...worktree, 'rev-parse', '--show-toplevel']) !== card.worktreePath ||
               await git([...worktree, 'symbolic-ref', '--short', 'HEAD']) !== card.branch) throw new Error('worktree-linkage-mismatch')

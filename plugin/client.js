@@ -146,6 +146,50 @@ return {
       return card.column === 'in-progress' ? 'Agent Session running' : 'Open Agent Session'
     }
 
+    function LocalReviewPanel(props) {
+      const [review, setReview] = React.useState(null)
+      const [error, setError] = React.useState(null)
+      const [accepting, setAccepting] = React.useState(false)
+      React.useEffect(() => {
+        let cancelled = false
+        host.call('ticket.review', { workspaceId: props.workspaceId, file: props.card.file }).then(
+          (reply) => {
+            if (cancelled) return
+            if (reply && reply.ok) { setReview(reply); setError(null) }
+            else if (reply && String(reply.error || '').includes('local-completion-only')) { setReview(null); setError(null) }
+            else setError((reply && reply.error) || 'ticket.review failed')
+          },
+          (err) => { if (!cancelled) setError(String((err && err.message) || err)) },
+        )
+        return () => { cancelled = true }
+      }, [props.workspaceId, props.card.file])
+      if (review === null && error === null) return null
+      const accept = (event) => {
+        event.stopPropagation()
+        if (!review || !review.canAccept || accepting) return
+        setAccepting(true)
+        setError(null)
+        host.call('ticket.accept', { workspaceId: props.workspaceId, file: props.card.file, review }).then(
+          (reply) => {
+            setAccepting(false)
+            if (reply && reply.ok) props.onSaved()
+            else setError((reply && reply.error) || 'ticket.accept failed')
+          },
+          (err) => { setAccepting(false); setError(String((err && err.message) || err)) },
+        )
+      }
+      return h('section', { className: 'kanban-local-review', onClick: (event) => event.stopPropagation() },
+        error ? h('div', { className: 'kanban-dialog-error', role: 'alert' }, error) : null,
+        !review ? null : h(React.Fragment, null,
+          h('div', { className: 'kanban-local-review-title' }, 'Changes against ' + review.baseBranch),
+          review.conflict ? h('div', { className: 'kanban-dialog-error', role: 'alert' }, 'Merge conflict\n' + review.conflict) : null,
+          h('pre', { className: 'kanban-local-diff', tabIndex: 0 }, review.diff || (review.cleanupPending ? 'Merge complete. Cleanup remains.' : 'No changes.')),
+          review.truncated ? h('div', { className: 'kanban-dialog-error' }, 'Diff output is truncated. Review the visible portion before Accept.') : null,
+          h('button', { className: 'kanban-btn kanban-btn-primary', type: 'button',
+            disabled: !review.canAccept || accepting, onClick: accept,
+          }, accepting ? 'Accepting…' : review.cleanupPending ? 'Finish cleanup' : 'Accept')))
+    }
+
     function BoardCard(props) {
       const card = props.card
       return h(
@@ -207,6 +251,8 @@ return {
             h('button', { key: action, className: 'kanban-btn', type: 'button',
               onClick: (event) => { event.stopPropagation(); props.onRecover(card, action) },
             }, label))) : null,
+        card.column === 'in-review'
+          ? h(LocalReviewPanel, { card, workspaceId: props.workspaceId, onSaved: props.onSaved }) : null,
         card.column === 'in-review'
           ? h(
               'button',
@@ -275,6 +321,8 @@ return {
             h(BoardCard, {
               key: card.id,
               card,
+              workspaceId: props.workspaceId,
+              onSaved: props.onSaved,
               onEdit: props.onEditCard,
               onDragStart: props.onDragStartCard,
               onDragEnd: props.onDragEndCard,
@@ -625,6 +673,8 @@ return {
               wipLimit,
               runningCount,
               queuedCount,
+              workspaceId,
+              onSaved: notifyBoardChange,
               onEditCard: (card) => setDialog({ mode: 'edit', card }),
               onBounce: (card) => setDialog({ mode: 'bounce', card }),
               onRecover: (card, action) => setDialog({ mode: 'recovery', card, action }),
@@ -978,6 +1028,10 @@ return {
       'color:var(--dsw-alias-brand-primary);text-decoration:none;}',
       '.kanban-card-session:hover{text-decoration:underline;}',
       '.kanban-card-reject{display:block;margin-top:8px;}',
+      '.kanban-local-review{margin-top:8px;padding-top:8px;border-top:1px solid var(--dsw-alias-border-l1);}',
+      '.kanban-local-review-title{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-local-diff{max-height:240px;margin:6px 0;padding:8px;overflow:auto;white-space:pre;',
+      'font-size:10px;line-height:1.4;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:4px;}',
       '.kanban-card-blocked{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-state-error-primary);border:1px solid var(--dsw-alias-state-error-primary);',
       'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',

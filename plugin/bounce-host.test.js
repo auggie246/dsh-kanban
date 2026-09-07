@@ -120,7 +120,7 @@ async function openBoard(t, options = {}) {
       listeners.get(name).push(callback)
     },
   }
-  const source = ['frontmatter', 'settings', 'queue', 'execution', 'watch', 'bounce', 'host']
+  const source = ['frontmatter', 'settings', 'queue', 'execution', 'watch', 'bounce', 'completion', 'host']
     .map((name) => fs.readFileSync(path.join(__dirname, name + '.js'), 'utf8')).join('\n')
   const plugin = new Function('harness', source)({
     handle(name, handler) {
