@@ -146,8 +146,10 @@ Backlog and no agent may touch it. Refinement has two modes: capture a rough
 Ticket by hand (brain-dump, no quality bar), then run a **Refinement Session**
 — an Agent Session that runs the `grill-with-docs` skill (an external
 dependency, from Matt Pocock's skills) to interview the user and pull the
-missing detail out of their head. Without the skill installed, Refinement
-Sessions are unavailable; manual editing still works.
+missing detail out of their head. The Refine action opens that session in the
+plain Workspace and creates no Worktree or execution linkage. Without a
+model-invocable copy of the skill, the action explains the dependency and
+spawns nothing; manual editing still works.
 
 ### Refinement Session
 

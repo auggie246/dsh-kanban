@@ -13,7 +13,7 @@
 // is never overwritten.
 
 return {
-  inject: ['workspaceRegistry', 'fs', 'storageDomain', 'shell', 'agents', 'agentDefaultModel', 'agentPresets'],
+  inject: ['workspaceRegistry', 'fs', 'storageDomain', 'shell', 'agents', 'agentDefaultModel', 'agentPresets', 'skills'],
   async apply(ctx) {
     const registry = ctx.workspaceRegistry
     const fs = ctx.fs
@@ -22,6 +22,7 @@ return {
     const agents = ctx.agents
     const agentDefaultModel = ctx.agentDefaultModel
     const agentPresets = ctx.agentPresets
+    const skills = ctx.skills
     // Retain exact factory handles: disposing an Agent scope alone does not
     // unregister its session. Never dispose an unrelated, externally owned Agent.
     const sessionHandles = new Map()
@@ -663,6 +664,83 @@ return {
           })
         } catch (err) {
           return { ok: false, error: 'ticket-update-failed: ' + String((err && err.message) || err) }
+        }
+      }),
+    )
+
+    let refinementSequence = 0
+    // ticket.refine({ workspaceId, file }) starts a Refinement Session only
+    // when the external skill is model-invocable for this Workspace. The Host
+    // never writes the Ticket File or creates a Worktree during this action.
+    ctx.effect(() =>
+      harness.handle('ticket.refine', async (args) => {
+        const workspaceLookup = workspaceOf(args)
+        if (workspaceLookup.workspace === undefined) return { ok: false, error: workspaceLookup.error }
+        const file = String((args && args.file) || '')
+        let handle
+        try {
+          const loaded = await readTicket(ticketsDir(workspaceLookup.workspace), file)
+          if (loaded.error !== undefined) return { ok: false, error: loaded.error }
+          const card = parseTicketFile(file, loaded.text)
+          if (card === null) return { ok: false, error: 'not-a-ticket-file' }
+          if (card.column !== 'backlog') return { ok: false, error: 'ticket-not-in-backlog' }
+
+          const catalog = await skills.list({ cwd: workspaceLookup.workspace.path })
+          const available = catalog.some((skill) =>
+            skill.name === 'grill-with-docs' && skill.invocation && skill.invocation.modelInvocable === true)
+          if (!available) {
+            return {
+              ok: false,
+              error: 'Install the external `grill-with-docs` skill with model invocation enabled before starting a Refinement Session.',
+            }
+          }
+
+          const workspacePath = workspaceLookup.workspace.path.replace(/\/+$/, '')
+          const sessionId = ('kanban-refine-' + workspaceLookup.workspaceId + '-' + card.id + '-' +
+            Date.now() + '-' + (++refinementSequence)).toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
+          const selection = agentDefaultModel.currentSelection()
+          const preset = await agentPresets.resolve()
+          handle = await agents.create({
+            sessionId,
+            meta: { cwd: workspacePath, agentPreset: preset.id },
+            agentOptions: { provider: selection.provider, model: selection.model },
+            setup: (agentCtx) => agentPresets.mount(agentCtx, preset.id),
+          })
+          rememberSession(handle)
+          await handle.agent.whenIdle()
+          const brief = [
+            'Refine ' + card.id + ' by using the external `grill-with-docs` skill.',
+            '',
+            'First, call the `skill` tool with `grill-with-docs`. Follow its instructions completely.',
+            'Interview the user to extract the goal, context, and acceptance criteria.',
+            '',
+            'Refinement rules:',
+            '- Work in the plain Workspace `' + workspacePath + '`.',
+            '- Read and write only the Ticket File `' + loaded.target + '`.',
+            '- Do not create, edit, rename, or delete any other file.',
+            '- Preserve the Ticket File frontmatter exactly.',
+            '- The Ticket must remain in Backlog. Only the user may move it to Ready.',
+            '- Do not create or use a Worktree, branch, or commit.',
+            '- After the interview, write the enriched goal, context, and acceptance criteria into the Ticket File body.',
+            '- Keep the markdown human-readable so the user can review its diff before moving the Ticket.',
+            '',
+            'Current Ticket File:',
+            '',
+            loaded.text,
+          ].join('\n')
+          handle.agent.followup({
+            id: 'kanban-refine-brief-' + sessionId,
+            role: 'user',
+            content: [{ type: 'text', text: brief }],
+            source: { kind: 'plugin', plugin: 'dsh-kanban' },
+          })
+          return { ok: true, sessionId }
+        } catch (err) {
+          if (handle !== undefined) {
+            try { await handle.dispose() } catch {}
+            if (handle.agent) sessionHandles.delete(handle.agent.id)
+          }
+          return { ok: false, error: 'ticket-refine-failed: ' + String((err && err.message) || err) }
         }
       }),
     )

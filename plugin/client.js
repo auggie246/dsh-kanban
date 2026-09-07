@@ -210,6 +210,22 @@ return {
         card.blocked === ''
           ? null
           : h('div', { className: 'kanban-card-blocked', title: card.blocked }, 'Blocked — ' + card.blocked),
+        card.column === 'backlog'
+          ? h(
+              'button',
+              {
+                className: 'kanban-btn kanban-card-refine',
+                type: 'button',
+                disabled: props.refining,
+                title: 'Start a Refinement Session with grill-with-docs',
+                onClick: (event) => {
+                  event.stopPropagation()
+                  props.onRefine(card)
+                },
+              },
+              props.refining ? 'Refining…' : 'Refine',
+            )
+          : null,
         isQueued(card)
           ? h(
               'div',
@@ -330,6 +346,8 @@ return {
               onDequeue: props.onDequeue,
               onBounce: props.onBounce,
               onRecover: props.onRecover,
+              onRefine: props.onRefine,
+              refining: props.refiningFile === card.file,
             }),
           ),
         ),
@@ -580,6 +598,7 @@ return {
       const [dragFile, setDragFile] = React.useState(null)
       const [dragOverColumn, setDragOverColumn] = React.useState(null)
       const [moveError, setMoveError] = React.useState(null)
+      const [refiningFile, setRefiningFile] = React.useState(null)
       const boardVersion = useBoardVersion()
       const watchVersion = useWatchVersion()
       const workspaceId = workspace === undefined ? undefined : workspace.workspaceId
@@ -632,6 +651,31 @@ return {
         )
       }
 
+      const refine = (card) => {
+        if (refiningFile !== null) return
+        if (sessions === undefined) {
+          setMoveError('Agent Sessions are unavailable.')
+          return
+        }
+        setMoveError(null)
+        setRefiningFile(card.file)
+        host.call('ticket.refine', { workspaceId, file: card.file }).then(
+          (reply) => {
+            setRefiningFile(null)
+            if (reply && reply.ok) {
+              setOpen(false)
+              sessions.open(reply.sessionId)
+            } else {
+              setMoveError((reply && reply.error) || 'ticket.refine failed')
+            }
+          },
+          (err) => {
+            setRefiningFile(null)
+            setMoveError(String((err && err.message) || err))
+          },
+        )
+      }
+
       // The host owns the queue decision: an over-limit drop into In
       // Progress queues the Ticket there (issue #5), so the Board sends
       // every move and renders the state the host reports back.
@@ -678,6 +722,8 @@ return {
               onEditCard: (card) => setDialog({ mode: 'edit', card }),
               onBounce: (card) => setDialog({ mode: 'bounce', card }),
               onRecover: (card, action) => setDialog({ mode: 'recovery', card, action }),
+              onRefine: refine,
+              refiningFile,
               onDragStartCard: (file) => setDragFile(file),
               onDragEndCard: () => {
                 setDragFile(null)
