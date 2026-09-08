@@ -251,6 +251,7 @@ return {
             ticketId: card.id,
             ticketSlug: slugMatch[1],
             ticketText: loaded.text,
+            issueUrl: card.issue,
             baseMode: card.base,
           },
           kanbanHostExecutionAdapter({
@@ -326,6 +327,7 @@ return {
             ticketId: card.id,
             ticketSlug: slugMatch[1],
             ticketText: loaded.text,
+            issueUrl: card.issue,
             baseMode: card.base,
           },
           kanbanHostExecutionAdapter({
@@ -554,15 +556,20 @@ return {
         for (const workspace of registry.list()) {
           const workspaceId = String(workspace.id)
           const lookup = { workspaceId, workspace }
+          const command = (args, allowed = [0]) => kanbanRunHostCommand(shell, workspace.path, args, {
+            allowedExitCodes: allowed, timeoutMs: 30000, stdoutMaxBytes: 262144,
+          })
           let remote
-          try { remote = await kanbanDetectRemote(completionGit(workspace)) } catch (err) {
+          try {
+            remote = await kanbanDetectRemote(
+              completionGit(workspace),
+              (location) => kanbanProbeRemotePlatform(location, command),
+            )
+          } catch (err) {
             console.error('kanban remote detection failed: ' + String((err && err.message) || err))
             continue
           }
           if (remote.platform === 'none') continue
-          const command = (args, allowed = [0]) => kanbanRunHostCommand(shell, workspace.path, args, {
-            allowedExitCodes: allowed, timeoutMs: 30000, stdoutMaxBytes: 262144,
-          })
           const platform = kanbanRemotePlatformAdapter(remote, command)
           for (const card of await readBoardCards(lookup)) {
             if (card.column !== 'in-review' || card.branch === '' || card.worktreePath === '') continue
@@ -585,7 +592,7 @@ return {
                 }, {
                   parseTicketFile,
                   setTicketAttr: kanbanSetAttr,
-                  review: (branch) => platform.review(branch),
+                  review: (branch, recordedUrl) => platform.review(branch, recordedUrl),
                   git: completionGit(workspace),
                   persistTicket: (text) => fs.writeText(loaded.target, text),
                   async releaseSession() {
@@ -750,6 +757,7 @@ return {
         const file = String((args && args.file) || '')
         let handle
         try {
+          return await enqueueMove(async () => {
           const loaded = await readTicket(ticketsDir(workspaceLookup.workspace), file)
           if (loaded.error !== undefined) return { ok: false, error: loaded.error }
           const card = parseTicketFile(file, loaded.text)
@@ -767,6 +775,8 @@ return {
           }
 
           const workspacePath = workspaceLookup.workspace.path.replace(/\/+$/, '')
+          const ticketFrontmatter = loaded.text.slice(0, loaded.text.length - card.body.length)
+          let refinementBody = card.body
           const sessionId = ('kanban-refine-' + workspaceLookup.workspaceId + '-' + card.id + '-' +
             Date.now() + '-' + (++refinementSequence)).toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
           const selection = agentDefaultModel.currentSelection()
@@ -775,7 +785,37 @@ return {
             sessionId,
             meta: { cwd: workspacePath, agentPreset: preset.id },
             agentOptions: { provider: selection.provider, model: selection.model },
-            setup: (agentCtx) => agentPresets.mount(agentCtx, preset.id),
+            setup: async (agentCtx) => {
+              await agentPresets.mount(agentCtx, preset.id)
+              const tools = agentCtx.get('tools')
+              if (tools === undefined) throw new Error('Refinement Session tools are unavailable')
+              tools.restrict({ allow: ['skill', 'read', 'edit'] })
+              tools.guard((execution) => {
+                if (execution.name === 'run_code') return undefined
+                if (!['skill', 'read', 'edit'].includes(execution.name)) {
+                  return 'Refinement Sessions can only load the skill and edit their Ticket File.'
+                }
+                const args = execution.arguments && typeof execution.arguments === 'object' ? execution.arguments : {}
+                if (execution.name === 'skill' && args.name !== 'grill-with-docs') {
+                  return 'This Refinement Session can only load grill-with-docs.'
+                }
+                if ((execution.name === 'read' || execution.name === 'edit') && args.file_path !== loaded.target) {
+                  return 'This Refinement Session can only access ' + loaded.target
+                }
+                if (execution.name === 'edit') {
+                  if (typeof args.old_string !== 'string' || args.old_string === '' ||
+                      !refinementBody.includes(args.old_string) || ticketFrontmatter.includes(args.old_string)) {
+                    return 'This Refinement Session can only replace content from the Ticket File body.'
+                  }
+                  if (typeof args.new_string === 'string') {
+                    const count = refinementBody.split(args.old_string).length - 1
+                    if (args.replace_all === true) refinementBody = refinementBody.split(args.old_string).join(args.new_string)
+                    else if (count === 1) refinementBody = refinementBody.replace(args.old_string, args.new_string)
+                  }
+                }
+                return undefined
+              })
+            },
           })
           rememberSession(handle)
           await handle.agent.whenIdle()
@@ -806,6 +846,7 @@ return {
             source: { kind: 'plugin', plugin: 'dsh-kanban' },
           })
           return { ok: true, sessionId }
+          })
         } catch (err) {
           if (handle !== undefined) {
             try { await handle.dispose() } catch {}

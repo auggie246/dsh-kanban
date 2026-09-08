@@ -1,9 +1,20 @@
 // Local and remote completion orchestration, called through Board RPCs.
 // Concatenate after frontmatter.js and before host.js. Plain JavaScript only.
 
+function kanbanRemoteLocation(remoteUrl) {
+  const url = String(remoteUrl || '').trim()
+  let match = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^/@]+@)?([^/:]+)(?::\d+)?\/(.+)$/.exec(url)
+  if (match === null) match = /^(?:[^/@:]+@)?([^/:]+):(.+)$/.exec(url)
+  if (match === null) return { host: '', repo: '' }
+  return {
+    host: match[1].toLowerCase(),
+    repo: match[1] + '/' + match[2].replace(/^\/+|\/+$/g, '').replace(/\.git$/, ''),
+  }
+}
+
 // Detect the supported remote used for completion. `origin` wins when several
 // supported remotes exist, because Ticket branches are normally pushed there.
-async function kanbanDetectRemote(git) {
+async function kanbanDetectRemote(git, probe) {
   const names = String((await git(['remote'])).text || '').split(/\r?\n/)
     .map((name) => name.trim()).filter((name) => name !== '')
   const ordered = names.includes('origin') ? ['origin', ...names.filter((name) => name !== 'origin')] : names
@@ -12,11 +23,22 @@ async function kanbanDetectRemote(git) {
     const result = await git(['remote', 'get-url', remote], [0, 2, 128])
     if (result.exitCode !== 0) continue
     const url = String(result.text || '').trim()
-    const host = url.toLowerCase()
-    if (/(^|[/:@])github\.com[/:]/.test(host)) return { platform: 'github', remote, url }
-    if (/(^|[/:@])gitlab\.com[/:]/.test(host)) return { platform: 'gitlab', remote, url }
+    const location = kanbanRemoteLocation(url)
+    if (/(^|\.)github(?:\.|$)/.test(location.host)) return { platform: 'github', remote, url, repo: location.repo }
+    if (/(^|\.)gitlab(?:\.|$)/.test(location.host)) return { platform: 'gitlab', remote, url, repo: location.repo }
+    if (probe !== undefined && location.host !== '') {
+      const platform = await probe(location)
+      if (platform === 'github' || platform === 'gitlab') return { platform, remote, url, repo: location.repo }
+    }
   }
-  return { platform: 'none', remote: '', url: '' }
+  return { platform: 'none', remote: '', url: '', repo: '' }
+}
+
+async function kanbanProbeRemotePlatform(location, command) {
+  const github = await command(['gh', 'auth', 'status', '--hostname', location.host], [0, 1, 127])
+  if (github.exitCode === 0) return 'github'
+  const gitlab = await command(['glab', 'auth', 'status', '--hostname', location.host], [0, 1, 127])
+  return gitlab.exitCode === 0 ? 'gitlab' : 'none'
 }
 
 // Bind one supported platform CLI to the shared remote-completion interface.
@@ -26,10 +48,13 @@ function kanbanRemotePlatformAdapter(remote, command) {
     throw new Error('unsupported-remote-platform')
   }
   return {
-    async review(branch) {
+    async review(branch, recordedUrl) {
+      const gitlabId = /\/merge_requests\/(\d+)(?:[/?#]|$)/.exec(String(recordedUrl || ''))
+      const reference = recordedUrl === '' || recordedUrl === undefined
+        ? branch : remote.platform === 'gitlab' && gitlabId !== null ? gitlabId[1] : recordedUrl
       const args = remote.platform === 'github'
-        ? ['gh', 'pr', 'view', branch, '--json', 'url,state,mergedAt,headRefName']
-        : ['glab', 'mr', 'view', branch, '--output', 'json']
+        ? ['gh', 'pr', 'view', reference, '--repo', remote.repo, '--json', 'url,state,mergedAt,headRefName']
+        : ['glab', 'mr', 'view', reference, '--repo', remote.repo, '--output', 'json']
       const result = await command(args, [0, 1])
       if (!result || result.exitCode !== 0 || String(result.text || '').trim() === '') return null
       let value
@@ -55,12 +80,13 @@ async function kanbanCompleteRemoteTicket(request, adapter) {
   const root = request.workspacePath.replace(/\/+$/, '')
   if (!slug || card.branch !== 'kanban/' + card.id + '-' + slug[1] ||
       card.worktreePath !== root + '/.dsh-kanban/worktrees/' + slug[1]) throw new Error('unsafe-execution-linkage')
-  const review = await adapter.review(card.branch)
+  const review = await adapter.review(card.branch, card.reviewUrl)
   if (review === null) return { reviewUrl: card.reviewUrl, state: 'missing', merged: false }
-  let text = adapter.setTicketAttr(request.text, 'reviewUrl', review.url)
+  const reviewUrl = card.reviewUrl || review.url
+  let text = adapter.setTicketAttr(request.text, 'reviewUrl', reviewUrl)
   if (text === null) throw new Error('not-a-ticket-file')
-  if (card.reviewUrl !== review.url) await adapter.persistTicket(text)
-  if (!review.merged) return { reviewUrl: review.url, state: review.state, merged: false }
+  if (card.reviewUrl === '') await adapter.persistTicket(text)
+  if (!review.merged) return { reviewUrl, state: review.state, merged: false }
 
   const worktrees = await adapter.git(['worktree', 'list', '--porcelain'])
   const entries = worktrees.text.trim().split(/\r?\n\r?\n/).filter(Boolean).map((block) => block.split(/\r?\n/))
@@ -82,7 +108,7 @@ async function kanbanCompleteRemoteTicket(request, adapter) {
     text = adapter.setTicketAttr(text, key, value)
   }
   await adapter.persistTicket(text)
-  return { reviewUrl: review.url, state: 'merged', merged: true }
+  return { reviewUrl, state: 'merged', merged: true }
 }
 
 async function kanbanAcceptLocalTicket(request, adapter) {
@@ -145,6 +171,7 @@ async function kanbanLocalReview(request, git) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     kanbanDetectRemote,
+    kanbanProbeRemotePlatform,
     kanbanRemotePlatformAdapter,
     kanbanCompleteRemoteTicket,
     kanbanRemotePollDelay,

@@ -12,7 +12,11 @@ The Board must capture that change request and finish cleanup after the platform
 
 ## Decision
 
-Remote detection reads configured Git remotes. `origin` wins when multiple supported remotes exist.
+Remote detection parses each remote URL host. For an arbitrary enterprise host, authenticated CLI configuration identifies the platform.
+
+`origin` wins when multiple supported remotes exist.
+
+Platform commands bind to the detected repository. After capture, polling addresses the durable PR/MR URL instead of its source branch.
 
 GitHub and GitLab Agent Session briefs require the Ticket branch to be pushed. They require `gh pr create` or `glab mr create` respectively.
 

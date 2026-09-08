@@ -19,6 +19,8 @@ async function openRefinementBoard(t, options = {}) {
   const messages = []
   const skillLookups = []
   const writes = []
+  const restrictions = []
+  const guards = []
   const skills = options.skills || []
   const ctx = {
     workspaceRegistry: {
@@ -62,6 +64,13 @@ async function openRefinementBoard(t, options = {}) {
     agents: {
       get: () => undefined,
       async create(spec) {
+        if (spec.setup) {
+          const tools = {
+            restrict(value) { restrictions.push(value) },
+            guard(value) { guards.push(value) },
+          }
+          await spec.setup({ get: (name) => name === 'tools' ? tools : undefined })
+        }
         created.push(spec)
         const agent = {
           id: spec.sessionId,
@@ -111,6 +120,8 @@ async function openRefinementBoard(t, options = {}) {
     messages,
     skillLookups,
     writes,
+    restrictions,
+    guards,
     async call(args = {}) {
       assert.equal(typeof methods.get('ticket.refine'), 'function', 'ticket.refine must be registered')
       return methods.get('ticket.refine')({ workspaceId: workspace.id, file, ...args })
@@ -134,6 +145,7 @@ test('Refine explains the grill-with-docs dependency and does not spawn when the
 
 test('Refine starts one Agent Session in the plain Workspace for only the Backlog Ticket File', async (t) => {
   const board = await openRefinementBoard(t, {
+    ticketText: '---\nid: KAN-101\ntitle: Refine login\ncolumn: backlog\n---\nLogin sometimes fails in backlog.\n',
     skills: [{
       name: 'grill-with-docs',
       description: 'Interview the user and write a plan.',
@@ -165,4 +177,23 @@ test('Refine starts one Agent Session in the plain Workspace for only the Backlo
   assert.equal(board.writes.length, 0)
   assert.equal(fs.readFileSync(board.ticketPath, 'utf8'), before)
   assert.equal(fs.existsSync(path.join(board.root, '.dsh-kanban', 'worktrees')), false)
+  assert.deepEqual(board.restrictions, [{ allow: ['skill', 'read', 'edit'] }])
+  assert.equal(board.guards.length, 1)
+  assert.equal(board.guards[0]({ name: 'edit', arguments: {
+    file_path: board.ticketPath, old_string: 'Login sometimes fails in backlog.', new_string: '# Goal\nReliable login.',
+  } }), undefined)
+  assert.equal(board.guards[0]({ name: 'edit', arguments: {
+    file_path: board.ticketPath, old_string: 'Reliable login.', new_string: 'Reliable login with acceptance criteria.',
+  } }), undefined)
+  assert.match(board.guards[0]({ name: 'edit', arguments: {
+    file_path: board.ticketPath, old_string: 'backlog\n---\nLogin', new_string: 'ready\n---\nLogin',
+  } }), /only replace content from the Ticket File body/)
+  assert.match(board.guards[0]({ name: 'edit', arguments: {
+    file_path: board.ticketPath, old_string: 'column: backlog', new_string: 'column: ready',
+  } }), /only replace content from the Ticket File body/)
+  assert.match(board.guards[0]({ name: 'edit', arguments: {
+    file_path: board.ticketPath, old_string: 'backlog', new_string: 'ready', replace_all: true,
+  } }), /only replace content from the Ticket File body/)
+  assert.match(board.guards[0]({ name: 'edit', arguments: { file_path: path.join(board.root, 'plugin', 'host.js') } }), /only access/)
+  assert.match(board.guards[0]({ name: 'write', arguments: { file_path: board.ticketPath } }), /only load the skill and edit/)
 })

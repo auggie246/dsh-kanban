@@ -76,13 +76,14 @@ function makeAdapter(workspace) {
 
 test('a GitHub completion brief requires a pushed Ticket branch and linked Issue PR', () => {
   const brief = kanbanExecutionBrief(
-    '---\nid: KAN-101\nissue: https://github.com/owner/repo/issues/10\n---\nFix it.\n',
+    '---\nid: KAN-101\nissue: https://github.com/owner/repo/issues/10\n---\nFix it.\nissue: https://example.test/wrong\n',
     'kanban/KAN-101-fix', '/workspace', '/workspace/.dsh-kanban/worktrees/fix',
-    { platform: 'github', remote: 'origin' },
+    { platform: 'github', remote: 'origin' }, 'https://github.com/owner/repo/issues/10',
   )
   assert.match(brief, /git push -u origin kanban\/KAN-101-fix/)
   assert.match(brief, /gh pr create/)
-  assert.match(brief, /https:\/\/github\.com\/owner\/repo\/issues\/10/)
+  assert.match(brief, /Reference the linked Issue `https:\/\/github\.com\/owner\/repo\/issues\/10`/)
+  assert.doesNotMatch(brief, /Reference the linked Issue `https:\/\/example\.test\/wrong`/)
 })
 
 test('a GitLab completion brief requires a pushed Ticket branch and MR', () => {

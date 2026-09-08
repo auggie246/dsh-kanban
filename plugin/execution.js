@@ -13,6 +13,7 @@ function kanbanExecutionInput(request) {
   const ticketId = String(request.ticketId || '').trim().toUpperCase()
   const ticketSlug = String(request.ticketSlug || '').trim().toLowerCase()
   const ticketText = String(request.ticketText || '')
+  const issueUrl = String(request.issueUrl || '').trim()
   const baseMode = request.baseMode === 'head' ? 'head' : 'remote'
   if (workspaceId === '') throw new Error('Ticket execution requires a Workspace id')
   if (workspacePath === '') throw new Error('Ticket execution requires a Workspace path')
@@ -20,7 +21,7 @@ function kanbanExecutionInput(request) {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(ticketSlug) || ticketSlug.length > 40) {
     throw new Error('Ticket execution requires a valid Ticket slug')
   }
-  return { workspaceId, workspacePath, ticketId, ticketSlug, ticketText, baseMode }
+  return { workspaceId, workspacePath, ticketId, ticketSlug, ticketText, issueUrl, baseMode }
 }
 
 function kanbanEnsureIgnoreLine(text, line) {
@@ -31,7 +32,7 @@ function kanbanEnsureIgnoreLine(text, line) {
   return next + line + '\n'
 }
 
-function kanbanExecutionBrief(ticketText, branch, workspacePath, worktreePath, remote) {
+function kanbanExecutionBrief(ticketText, branch, workspacePath, worktreePath, remote, issueUrl) {
   const rules = [
     '- Work only on branch `' + branch + '`.',
     '- Work only inside the Worktree `' + worktreePath + '`.',
@@ -43,8 +44,7 @@ function kanbanExecutionBrief(ticketText, branch, workspacePath, worktreePath, r
     rules.push(remote.platform === 'github'
       ? '- Create its GitHub PR with `gh pr create` after pushing.'
       : '- Create its GitLab MR with `glab mr create` after pushing.')
-    const match = /^\s*issue:\s*["']?([^\s"']+)["']?\s*$/mi.exec(String(ticketText || ''))
-    if (match) rules.push('- Reference the linked Issue `' + match[1] + '` in the PR/MR description.')
+    if (issueUrl) rules.push('- Reference the linked Issue `' + issueUrl + '` in the PR/MR description.')
   }
   return [
     'Complete the Ticket below.',
@@ -88,8 +88,17 @@ function kanbanHostExecutionAdapter(deps) {
   }
   return {
     runGit,
-    detectRemote: () => kanbanDetectRemote((args, allowed = [0]) =>
-      kanbanRunHostGit(deps.shell, deps.workspace.path, args, { allowedExitCodes: allowed, timeoutMs: 30000 })),
+    detectRemote: () => {
+      const command = (args, allowed = [0]) => kanbanRunHostCommand(deps.shell, deps.workspace.path, args, {
+        allowedExitCodes: allowed, timeoutMs: 30000,
+      })
+      return kanbanDetectRemote(
+        (args, allowed = [0]) => kanbanRunHostGit(deps.shell, deps.workspace.path, args, {
+          allowedExitCodes: allowed, timeoutMs: 30000,
+        }),
+        (location) => kanbanProbeRemotePlatform(location, command),
+      )
+    },
     async readIgnore() {
       const target = await deps.fs.resolve(workspacePath + '/.gitignore')
       const info = await deps.fs.stat(target)
@@ -222,7 +231,9 @@ async function kanbanStartTicketExecution(request, adapter) {
     ticketPersisted = true
     await adapter.persistLinkage(linkageKey, linkage)
     linkagePersisted = true
-    await adapter.followup(session, kanbanExecutionBrief(input.ticketText, branch, input.workspacePath, worktreePath, completionRemote))
+    await adapter.followup(session, kanbanExecutionBrief(
+      input.ticketText, branch, input.workspacePath, worktreePath, completionRemote, input.issueUrl,
+    ))
     return linkage
   } catch (error) {
     const cleanupErrors = []

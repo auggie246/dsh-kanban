@@ -16,7 +16,11 @@ The `grill-with-docs` skill is an external dependency. A session cannot refine s
 
 The Board exposes `ticket.refine` only for Backlog Tickets. The Host checks that `grill-with-docs` is model-invocable before spawning.
 
-A Refinement Session uses the plain Workspace as its `cwd`. It receives a brief that permits changes only to the selected Ticket File.
+A Refinement Session uses the plain Workspace as its `cwd`. Its scoped tools allow only skill loading, reading, and editing.
+
+A scoped guard permits `grill-with-docs` and the selected Ticket File only. Edits must replace content from the original Ticket body.
+
+All other tool calls fail before execution. This prevents the session from changing frontmatter, including the Backlog column.
 
 The action does not create a Worktree, branch, commit, execution linkage, or Ticket frontmatter linkage. The Host returns the Session id for immediate Client navigation.
 
@@ -28,6 +32,6 @@ If the skill is absent or not model-invocable, the Host returns an installation 
 
 Refinement can edit the selected Ticket File directly and produce an ordinary Git diff for review.
 
-The Board cannot technically isolate a Workspace-level session to one file. The brief carries that restriction until a narrower sandbox capability exists.
+The Agent Session can discuss the whole Ticket, but its tools cannot access or modify another file.
 
 A page reload does not reconstruct a Refinement Session link from the Ticket File. Refinement does not overload execution linkage fields.
