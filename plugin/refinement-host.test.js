@@ -98,7 +98,7 @@ async function openRefinementBoard(t, options = {}) {
       if (dispose) disposers.push(dispose)
     },
   }
-  const names = ['frontmatter', 'settings', 'queue', 'execution', 'watch', 'bounce', 'completion', 'host']
+  const names = ['frontmatter', 'settings', 'queue', 'execution', 'watch', 'bounce', 'completion', 'import', 'host']
   const source = names.map((name) => fs.readFileSync(path.join(__dirname, name + '.js'), 'utf8')).join('\n')
   const plugin = new Function('harness', source)({
     handle(name, handler) {

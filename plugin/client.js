@@ -207,6 +207,12 @@ return {
         h('div', { className: 'kanban-card-head' }, h('span', { className: 'kanban-card-id' }, card.id)),
         h('div', { className: 'kanban-card-title' }, card.title),
         card.preview === '' ? null : h('div', { className: 'kanban-card-preview' }, card.preview),
+        card.issue === ''
+          ? null
+          : h('a', {
+              className: 'kanban-card-issue-link', href: card.issue, target: '_blank', rel: 'noreferrer',
+              onClick: (event) => event.stopPropagation(),
+            }, 'Open Issue'),
         card.reviewUrl === ''
           ? null
           : h('a', {
@@ -484,6 +490,93 @@ return {
           ),
         ),
       )
+    }
+
+    function IssueImportDialog(props) {
+      const [result, setResult] = React.useState(null)
+      const [selected, setSelected] = React.useState(new Set())
+      const [error, setError] = React.useState(null)
+      const [importing, setImporting] = React.useState(false)
+
+      React.useEffect(() => {
+        let cancelled = false
+        host.call('issue.import.list', { workspaceId: props.workspaceId }).then(
+          (reply) => {
+            if (cancelled) return
+            if (reply && reply.ok) setResult(reply)
+            else setError((reply && reply.error) || 'issue.import.list failed')
+          },
+          (err) => { if (!cancelled) setError(String((err && err.message) || err)) },
+        )
+        return () => { cancelled = true }
+      }, [props.workspaceId])
+
+      const toggle = (number) => {
+        setSelected((current) => {
+          const next = new Set(current)
+          if (next.has(number)) next.delete(number)
+          else next.add(number)
+          return next
+        })
+      }
+      const submit = () => {
+        if (importing || selected.size === 0) return
+        setImporting(true)
+        setError(null)
+        host.call('issue.import.create', {
+          workspaceId: props.workspaceId,
+          numbers: Array.from(selected),
+        }).then(
+          (reply) => {
+            setImporting(false)
+            if (reply && reply.ok) props.onSaved()
+            else setError((reply && reply.error) || 'issue.import.create failed')
+          },
+          (err) => {
+            setImporting(false)
+            setError(String((err && err.message) || err))
+          },
+        )
+      }
+
+      let content
+      if (result === null && error === null) {
+        content = h('div', { className: 'kanban-dialog-text' }, 'Reading open Issues…')
+      } else if (result && result.platform === 'none') {
+        content = h('div', { className: 'kanban-dialog-text' }, result.message)
+      } else if (result && result.issues.length === 0) {
+        content = h('div', { className: 'kanban-dialog-text' }, 'No open Issues are available to import.')
+      } else if (result) {
+        content = h('div', { className: 'kanban-import-list' }, result.issues.map((issue) =>
+          h('label', { className: 'kanban-import-row' + (issue.imported ? ' kanban-import-row-disabled' : ''), key: issue.url },
+            h('input', {
+              type: 'checkbox',
+              checked: selected.has(issue.number),
+              disabled: issue.imported || importing,
+              onChange: () => toggle(issue.number),
+            }),
+            h('span', { className: 'kanban-import-number' }, '#' + String(issue.number)),
+            h('span', { className: 'kanban-import-title' }, issue.title),
+            issue.imported ? h('span', { className: 'kanban-import-status' }, 'Imported') : null)))
+      } else {
+        content = null
+      }
+
+      return h('div', { className: 'kanban-dialog-backdrop', onKeyDown: (event) => {
+        if (event.key === 'Escape') { event.stopPropagation(); if (!importing) props.onCancel() }
+      } }, h('div', {
+        className: 'kanban-dialog', role: 'dialog', 'aria-modal': true, 'aria-label': 'Import Issues',
+      },
+      h('div', { className: 'kanban-dialog-title' }, 'Import Issues'),
+      h('div', { className: 'kanban-dialog-text' }, 'Selected open Issues become Backlog Tickets.'),
+      content,
+      error === null ? null : h('div', { className: 'kanban-dialog-error', role: 'alert' }, error),
+      h('div', { className: 'kanban-dialog-actions' },
+        h('button', { className: 'kanban-btn', type: 'button', disabled: importing, onClick: props.onCancel }, 'Cancel'),
+        result && result.platform !== 'none' ? h('button', {
+          className: 'kanban-btn kanban-btn-primary', type: 'button',
+          disabled: importing || selected.size === 0, onClick: submit,
+        }, importing ? 'Importing…' : 'Import selected') : null)))
     }
 
     function BounceDialog(props) {
@@ -797,15 +890,27 @@ return {
             : h('span', { className: 'kanban-board-workspace' }, workspace.title + ' — ' + workspace.path),
           workspaceId === undefined
             ? null
-            : h(
-                'button',
-                {
-                  className: 'kanban-new-btn',
-                  type: 'button',
-                  onClick: () => setDialog({ mode: 'create' }),
-                  title: 'Create a Ticket in the Backlog',
-                },
-                '+ New Ticket',
+            : h(React.Fragment, null,
+                h(
+                  'button',
+                  {
+                    className: 'kanban-import-btn',
+                    type: 'button',
+                    onClick: () => setDialog({ mode: 'import' }),
+                    title: 'Import open Issues into the Backlog',
+                  },
+                  'Import issues',
+                ),
+                h(
+                  'button',
+                  {
+                    className: 'kanban-new-btn',
+                    type: 'button',
+                    onClick: () => setDialog({ mode: 'create' }),
+                    title: 'Create a Ticket in the Backlog',
+                  },
+                  '+ New Ticket',
+                ),
               ),
           props.onClose === undefined
             ? null
@@ -823,7 +928,8 @@ return {
         body,
         dialog === null
           ? null
-          : h(dialog.mode === 'recovery' ? RecoveryDialog : dialog.mode === 'bounce' ? BounceDialog : TicketDialog, {
+          : h(dialog.mode === 'recovery' ? RecoveryDialog : dialog.mode === 'bounce' ? BounceDialog :
+              dialog.mode === 'import' ? IssueImportDialog : TicketDialog, {
               action: dialog.action,
               key: dialog.mode + '-' + (dialog.card ? dialog.card.file : 'new'),
               mode: dialog.mode,
@@ -1055,9 +1161,9 @@ return {
       '.kanban-board-name{font-size:15px;font-weight:600;}',
       '.kanban-board-workspace{flex:1;font-size:12px;color:var(--dsw-alias-label-secondary);',
       'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-      '.kanban-close,.kanban-new-btn{padding:4px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;',
+      '.kanban-close,.kanban-new-btn,.kanban-import-btn{padding:4px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;',
       'background:transparent;color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer;}',
-      '.kanban-close:hover,.kanban-new-btn:hover{background:var(--dsw-alias-bg-layer-1);}',
+      '.kanban-close:hover,.kanban-new-btn:hover,.kanban-import-btn:hover{background:var(--dsw-alias-bg-layer-1);}',
       '.kanban-new-btn{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);}',
       '.kanban-columns{flex:1;display:flex;gap:12px;padding:16px 20px;overflow-x:auto;}',
       '.kanban-column{flex:1 1 0;min-width:220px;display:flex;flex-direction:column;',
@@ -1076,6 +1182,9 @@ return {
       '.kanban-card-id{font-size:11px;font-weight:600;color:var(--dsw-alias-brand-primary);}',
       '.kanban-card-title{font-size:13px;font-weight:500;margin-bottom:4px;}',
       '.kanban-card-preview{font-size:12px;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-card-issue-link{display:inline-block;margin-top:7px;margin-right:10px;font-size:11px;font-weight:600;',
+      'color:var(--dsw-alias-brand-primary);text-decoration:none;}',
+      '.kanban-card-issue-link:hover{text-decoration:underline;}',
       '.kanban-card-session{display:inline-block;margin-top:7px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-brand-primary);text-decoration:none;}',
       '.kanban-card-session:hover{text-decoration:underline;}',
@@ -1117,6 +1226,13 @@ return {
       '.kanban-dialog-title{font-size:15px;font-weight:600;}',
       '.kanban-dialog-text{font-size:13px;color:var(--dsw-alias-label-secondary);}',
       '.kanban-dialog-error{font-size:12px;color:var(--dsw-alias-state-error-primary);white-space:pre-wrap;}',
+      '.kanban-import-list{display:flex;flex-direction:column;gap:6px;max-height:360px;overflow-y:auto;}',
+      '.kanban-import-row{display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--dsw-alias-border-l1);',
+      'border-radius:6px;font-size:12px;cursor:pointer;}',
+      '.kanban-import-row-disabled{opacity:.6;cursor:default;}',
+      '.kanban-import-number{flex:none;color:var(--dsw-alias-brand-primary);font-weight:600;}',
+      '.kanban-import-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.kanban-import-status{flex:none;color:var(--dsw-alias-state-success-primary);font-weight:600;}',
       '.kanban-field{display:flex;flex-direction:column;gap:4px;}',
       '.kanban-field-label{font-size:12px;color:var(--dsw-alias-label-secondary);}',
       '.kanban-input,.kanban-textarea{padding:6px 8px;font-size:13px;font-family:inherit;',

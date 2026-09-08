@@ -2,7 +2,7 @@
 //
 // `cordis_define` receives plugin/frontmatter.js, plugin/settings.js,
 // plugin/queue.js, plugin/execution.js, plugin/watch.js, plugin/bounce.js, and
-// plugin/completion.js concatenate before this file. Their helpers are in scope. Plain JavaScript only: no
+// plugin/completion.js and plugin/import.js concatenate before this file. Their helpers are in scope. Plain JavaScript only: no
 // imports, no TypeScript, and no Node globals.
 //
 // Write behaviour: every Ticket File write goes through the fs service's
@@ -679,6 +679,107 @@ return {
       }),
     )
 
+    const createTicketFile = async (workspace, title, body, options = {}) => {
+      const dirPath = ticketsDir(workspace)
+      let names = []
+      const dir = await fs.resolve(dirPath)
+      const info = await fs.stat(dir)
+      if (info !== undefined && info.type === 'directory') {
+        const entries = await fs.listDir(dir)
+        names = entries.filter((entry) => entry.type === 'file').map((entry) => {
+          const m = /^(kan-\d+)/i.exec(entry.name)
+          return m ? m[1] : null
+        })
+      }
+      const id = kanbanNextId(names)
+      const file = id + '-' + kanbanSlug(title) + '.md'
+      const text = serializeTicketFile({
+        id,
+        title,
+        column: 'backlog',
+        issue: options.issue || '',
+        base: options.base,
+      }, body)
+      const target = await fs.resolve(dirPath + '/' + file)
+      await fs.writeText(target, text, { kind: 'createIfAbsent' })
+      return { id, file }
+    }
+
+    const noIssueRemoteMessage = 'No GitHub or GitLab remote exists for this Workspace.'
+    const issueImportSource = async (workspace) => {
+      const command = (args, allowed = [0]) => kanbanRunHostCommand(shell, workspace.path, args, {
+        allowedExitCodes: allowed, timeoutMs: 30000, stdoutMaxBytes: 1048576,
+      })
+      const importGit = (args, allowed = [0]) => kanbanRunHostGit(shell, workspace.path, args, {
+        allowedExitCodes: args.length === 1 && args[0] === 'remote' ? [0, 128] : allowed,
+      })
+      const remote = await kanbanDetectRemote(
+        importGit,
+        (location) => kanbanProbeRemotePlatform(location, command),
+      )
+      if (remote.platform === 'none') return { remote, issues: [] }
+      return { remote, issues: await kanbanIssueImportAdapter(remote, command).listOpen() }
+    }
+
+    // issue.import.list({ workspaceId }) lists open remote Issues. Linked
+    // Issues remain visible with imported=true, so the dialog can explain why
+    // they cannot be selected again.
+    ctx.effect(() => harness.handle('issue.import.list', async (args) => {
+      const lookup = workspaceOf(args)
+      if (!lookup.workspace) return { ok: false, error: lookup.error }
+      try {
+        const source = await issueImportSource(lookup.workspace)
+        if (source.remote.platform === 'none') {
+          return { ok: true, platform: 'none', issues: [], message: noIssueRemoteMessage }
+        }
+        const tickets = await readBoardCards(lookup)
+        return {
+          ok: true,
+          platform: source.remote.platform,
+          issues: kanbanMarkImportedIssues(source.issues, tickets),
+        }
+      } catch (err) {
+        return { ok: false, error: 'issue-import-list-failed: ' + String((err && err.message) || err) }
+      }
+    }))
+
+    // issue.import.create({ workspaceId, numbers }) re-reads the remote list,
+    // accepts only selected open Issue numbers, and creates Backlog Ticket
+    // Files. A linked or unavailable Issue is skipped without another write.
+    ctx.effect(() => harness.handle('issue.import.create', async (args) => {
+      const lookup = workspaceOf(args)
+      if (!lookup.workspace) return { ok: false, error: lookup.error }
+      const numbers = Array.from(new Set((Array.isArray(args && args.numbers) ? args.numbers : [])
+        .map((number) => Number(number)).filter((number) => Number.isSafeInteger(number) && number > 0)))
+      try {
+        return await enqueueMove(async () => {
+          const source = await issueImportSource(lookup.workspace)
+          if (source.remote.platform === 'none') {
+            return { ok: true, platform: 'none', imported: [], skipped: numbers, message: noIssueRemoteMessage }
+          }
+          const available = new Map(source.issues.map((issue) => [issue.number, issue]))
+          const linked = new Set((await readBoardCards(lookup))
+            .map((ticket) => kanbanIssueLinkKey(ticket.issue)).filter(Boolean))
+          const imported = []
+          const skipped = []
+          for (const number of numbers) {
+            const issue = available.get(number)
+            const issueLink = kanbanIssueLinkKey(issue && issue.url)
+            if (!issue || issue.title.trim() === '' || issueLink === '' || linked.has(issueLink)) {
+              skipped.push(number)
+              continue
+            }
+            const ticket = await createTicketFile(lookup.workspace, issue.title.trim(), issue.body, { issue: issue.url })
+            imported.push({ number, ...ticket })
+            linked.add(issueLink)
+          }
+          return { ok: true, platform: source.remote.platform, imported, skipped }
+        })
+      } catch (err) {
+        return { ok: false, error: 'issue-import-create-failed: ' + String((err && err.message) || err) }
+      }
+    }))
+
     // ticket.create({ workspaceId, title, body }) → a new Ticket File in the
     // backlog column. The id continues the highest existing KAN number
     // (KAN-101 when the Board is empty); the file name is <id>-<slug>.md.
@@ -690,24 +791,8 @@ return {
         if (title === '') return { ok: false, error: 'title required' }
         const body = String((args && args.body) || '')
         const base = args && args.base === 'head' ? 'head' : undefined
-        const dirPath = ticketsDir(workspaceLookup.workspace)
         try {
-          let names = []
-          const dir = await fs.resolve(dirPath)
-          const info = await fs.stat(dir)
-          if (info !== undefined && info.type === 'directory') {
-            const entries = await fs.listDir(dir)
-            names = entries.filter((entry) => entry.type === 'file').map((entry) => {
-              const m = /^(kan-\d+)/i.exec(entry.name)
-              return m ? m[1] : null
-            })
-          }
-          const id = kanbanNextId(names)
-          const file = id + '-' + kanbanSlug(title) + '.md'
-          const text = serializeTicketFile({ id, title, column: 'backlog', issue: '', base }, body)
-          const target = await fs.resolve(dirPath + '/' + file)
-          await fs.writeText(target, text, { kind: 'createIfAbsent' })
-          return { ok: true, id, file }
+          return { ok: true, ...await createTicketFile(workspaceLookup.workspace, title, body, { base }) }
         } catch (err) {
           return { ok: false, error: 'ticket-create-failed: ' + String((err && err.message) || err) }
         }

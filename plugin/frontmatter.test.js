@@ -10,6 +10,15 @@ const {
   kanbanSetBody,
 } = require('./frontmatter.js')
 
+test('Ticket Files round-trip a linked Issue URL for Board card links', () => {
+  const issue = 'https://gitlab.com/group/repo/-/issues/34'
+  const text = serializeTicketFile({ id: 'KAN-112', title: 'Imported Issue', column: 'backlog', issue }, 'Remote body.\n')
+  const card = parseTicketFile('KAN-112-imported-issue.md', text)
+
+  assert.equal(card.issue, issue)
+  assert.match(text, /issue: "https:\/\/gitlab\.com\/group\/repo\/-\/issues\/34"/)
+})
+
 test('Ticket Files preserve the remote PR or MR URL through description edits', () => {
   const reviewUrl = 'https://github.com/owner/repo/pull/12'
   const text = serializeTicketFile({ id: 'KAN-110', title: 'Remote completion', column: 'in-review', reviewUrl }, 'Finished.\n')

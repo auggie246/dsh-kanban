@@ -69,7 +69,7 @@ async function openCompletionBoard(t, options = {}) {
     agentPresets: { resolve: async () => ({ id: 'test' }), mount: async () => {} },
     on: () => {}, effect: (setup) => { const dispose = setup(); if (dispose) disposers.push(dispose) },
   }
-  const sources = ['frontmatter', 'settings', 'queue', 'execution', 'watch', 'bounce', 'completion', 'host']
+  const sources = ['frontmatter', 'settings', 'queue', 'execution', 'watch', 'bounce', 'completion', 'import', 'host']
   const plugin = new Function('harness', sources.map((name) => fs.readFileSync(path.join(__dirname, name + '.js'), 'utf8')).join('\n'))({
     handle: (name, handler) => { methods.set(name, handler); return () => methods.delete(name) },
   })
