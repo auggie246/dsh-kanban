@@ -58,8 +58,10 @@ Ticket sits In Progress with a Queued badge, owns no Agent Session, and does
 not count toward the limit. The queue is earliest-first, ordered by the
 instant each Ticket was queued. When a running Ticket leaves In Progress —
 moving to In Review, Done, or anywhere else — the earliest queued Ticket
-spawns automatically, respecting the limit. Manually dequeuing returns the
-Ticket to Ready with no session spawned.
+spawns automatically, respecting the limit. If that Ticket gained an open
+native blocker while queued, it returns to Ready and the next queued Ticket
+is considered. Manually dequeuing returns the Ticket to Ready with no session
+spawned.
 
 ### In Review
 
@@ -181,10 +183,25 @@ the Workspace's git remote.
 
 ### Split Ownership
 
-The sync conflict policy: the remote Issue owns title, description, and
-comments; the Board owns column/state and pushes column moves as label writes
-immediately. Conflicts between the two sides are avoided by partitioning the
-fields they may write.
+The sync conflict policy: the remote Issue owns title, description, and human
+comments. The Board owns column/state and pushes column moves as label writes
+immediately. When a Ticket reaches Done, the Board appends one completion
+comment that references its merge, PR, or MR. No other Board action writes
+Issue text. Conflicts are avoided by partitioning the fields each side may
+write.
+
+### Issue Projection
+
+The Board's last successful view of a linked Issue's comments and native
+blockers. A Ticket card displays this projection without treating it as
+Board-owned state. An unavailable Issue leaves the last successful projection
+in place.
+
+### Sync Status
+
+The durable delivery state for one linked Ticket. Pending means the Board has
+not confirmed synchronization. Error records the last failed synchronization
+attempt. Success clears the error. A Sync Status never prevents a Ticket move.
 
 ## Autonomy concepts
 

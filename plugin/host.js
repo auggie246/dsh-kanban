@@ -40,6 +40,12 @@ return {
       tables: { tickets: { valueSchema: kanbanExecutionRecordSchema } },
     })
     const executionTable = executionDomain.table('tickets')
+    const issueSyncDomain = await storageDomain.open({
+      name: 'kanban_issue_sync',
+      version: 1,
+      tables: { tickets: { valueSchema: kanbanIssueSyncRecordSchema } },
+    })
+    const issueSyncTable = issueSyncDomain.table('tickets')
     let settingsAdmissionOpen = true
     let settingsTail = Promise.resolve()
 
@@ -75,6 +81,8 @@ return {
         moveAdmissionOpen = false
         await settingsTail
         await moveTail
+        if (issueSweepRunning !== undefined) await issueSweepRunning
+        await issueSyncDomain.close()
         await executionDomain.close()
         await settingsDomain.close()
       },
@@ -244,6 +252,20 @@ return {
         if (loaded.error !== undefined) return
         const card = parseTicketFile(plan.file, loaded.text)
         if (card === null || !kanbanIsQueued(card)) return
+        if (card.issue !== '') {
+          const syncRecord = await refreshIssueProjection(workspaceLookup, card, false)
+          const blockers = syncRecord === undefined
+            ? [] : syncRecord.blockers.filter((blocker) => blocker.state === 'open')
+          if (blockers.length > 0) {
+            let text = kanbanSetAttr(loaded.text, 'column', 'ready')
+            text = kanbanSetAttr(text, 'queued', null)
+            if (text === null) return
+            await fs.writeText(loaded.target, text)
+            await syncIssueColumn(workspaceLookup, card, 'ready')
+            continue
+          }
+          await syncIssueColumn(workspaceLookup, card, 'in-progress')
+        }
         await kanbanStartTicketExecution(
           {
             workspaceId: workspaceLookup.workspaceId,
@@ -298,6 +320,7 @@ return {
         if (column === 'in-progress') return { ok: false, error: 'bounce-comment-required' }
         return { ok: false, error: 'review-decision-required' }
       }
+      if (column === 'done' && card.column !== 'done') return { ok: false, error: 'completion-required' }
 
       // A queued Ticket dropped on In Progress again is already in line.
       if (column === 'in-progress' && kanbanIsQueued(card)) {
@@ -305,6 +328,11 @@ return {
       }
 
       if (column === 'in-progress' && card.column === 'ready') {
+        if (card.issue !== '') await refreshIssueProjection(workspaceLookup, card)
+        const syncRecord = issueSyncTable.get(workspaceLookup.workspaceId + '/' + card.id)
+        const blockers = syncRecord === undefined
+          ? [] : syncRecord.blockers.filter((blocker) => blocker.state === 'open')
+        if (blockers.length > 0) return { ok: false, error: 'issue-blocked', blockers }
         if (card.sessionId !== '') return { ok: false, error: 'ticket-already-started' }
         const tickets = await readBoardCards(workspaceLookup)
         const admission = kanbanQueueAdmission({ tickets, wipLimit: wipLimitFor(workspaceLookup) })
@@ -313,7 +341,7 @@ return {
           queuedText = kanbanSetAttr(queuedText, 'queued', new Date().toISOString())
           if (queuedText === null) return { ok: false, error: 'not-a-ticket-file' }
           await fs.writeText(loaded.target, queuedText)
-          await syncIssueColumn(workspaceLookup.workspace, card.issue, column)
+          await syncIssueColumn(workspaceLookup, card, column)
           // The queue head may now have a free slot (issue #5 keeps the
           // queue strictly FIFO — the moved Ticket never jumps it).
           await pumpQueue(workspaceLookup).catch(logPumpFailure)
@@ -344,7 +372,7 @@ return {
             setTicketAttr: kanbanSetAttr,
           }),
         )
-        await syncIssueColumn(workspaceLookup.workspace, card.issue, column)
+        await syncIssueColumn(workspaceLookup, card, column)
         return { ok: true, file, column, ...linkage }
       }
 
@@ -352,7 +380,7 @@ return {
       if (kanbanIsQueued(card)) text = kanbanSetAttr(text, 'queued', null)
       if (text === null) return { ok: false, error: 'not-a-ticket-file' }
       await fs.writeText(loaded.target, text)
-      await syncIssueColumn(workspaceLookup.workspace, card.issue, column)
+      await syncIssueColumn(workspaceLookup, card, column)
       await pumpQueue(workspaceLookup).catch(logPumpFailure)
       return { ok: true, file, column }
     }
@@ -378,6 +406,23 @@ return {
       if (!card.sessionId || agent === undefined) return 'error'
       if (agent.status === 'idle' && attention !== 'approval') return 'error'
       return attention
+    }
+
+    const cardIssueSync = (workspaceId, card) => {
+      if (card.issue === '') return { issueComments: [], issueBlockers: [], sync: null }
+      const record = issueSyncTable.get(String(workspaceId) + '/' + card.id)
+      if (record === undefined) {
+        return { issueComments: [], issueBlockers: [], sync: { status: 'pending', error: '', lastSuccessAt: '' } }
+      }
+      return {
+        issueComments: record.comments,
+        issueBlockers: record.blockers.filter((blocker) => blocker.state === 'open'),
+        sync: {
+          status: record.error === '' ? 'ok' : 'error',
+          error: record.error,
+          lastSuccessAt: record.lastSuccessAt,
+        },
+      }
     }
 
     // Locate one Ticket File by its Ticket id. The Ticket File — not the
@@ -530,6 +575,7 @@ return {
           // nothing.
           const tickets = (await readBoardCards(workspaceLookup)).map((card) => ({
             ...card,
+            ...cardIssueSync(workspaceLookup.workspaceId, card),
             attention: cardAttention(card),
             stalled: card.column === 'in-progress' && cardAttention(card) === 'error',
             attentionMessage: cardAttention(card) === 'error'
@@ -605,7 +651,11 @@ return {
                   },
                 })
                 if (completed.merged) {
-                  if (current.issue !== '') await kanbanIssueSyncAdapter(remote, command).setColumn(current.issue, 'done')
+                  if (current.issue !== '') {
+                    const issueSync = kanbanIssueSyncAdapter(remote, command)
+                    await issueSync.setColumn(current.issue, 'done')
+                    await issueSync.complete(current.issue, completed.reviewUrl)
+                  }
                   await executionTable.delete(workspaceId + '/' + current.id)
                   invalidateWatch(current.sessionId)
                   await pumpQueue(lookup).catch(logPumpFailure)
@@ -616,6 +666,9 @@ return {
               else remotePollState.set(key, { attempt: state.attempt + 1, nextAt: now + kanbanRemotePollDelay(state.attempt) })
             } catch (err) {
               remotePollState.set(key, { attempt: state.attempt + 1, nextAt: now + kanbanRemotePollDelay(state.attempt) })
+              if (card.issue !== '') {
+                await storeSyncFailure(syncRecordKey(workspaceId, card.id), card.issue, err)
+              }
               console.error('kanban remote completion failed for ' + card.id + ': ' + String((err && err.message) || err))
             }
           }
@@ -631,6 +684,7 @@ return {
       harness.handle('board.watch.list', async () => {
         try {
           await pollRemoteTickets()
+          await sweepIssueSync()
           const tickets = []
           for (const workspace of registry.list()) {
             const workspaceId = String(workspace.id)
@@ -641,7 +695,7 @@ return {
           }
           tickets.sort((a, b) => a.ticketId.localeCompare(b.ticketId))
           const summary = { count: tickets.length, tickets }
-          return { ok: true, count: summary.count, tickets: summary.tickets }
+          return { ok: true, count: summary.count, tickets: summary.tickets, syncRevision: issueSyncRevision }
         } catch (err) {
           return { ok: false, error: 'watch-read-failed: ' + String((err && err.message) || err) }
         }
@@ -728,12 +782,159 @@ return {
       if (source.remote.platform === 'none') return { remote: source.remote, issues: [] }
       return { remote: source.remote, issues: await kanbanIssueImportAdapter(source.remote, source.command).listOpen() }
     }
-    const syncIssueColumn = async (workspace, issue, column) => {
-      if (issue === '') return
-      const source = await issueRemote(workspace)
-      if (source.remote.platform === 'none') throw new Error('linked Issue has no supported Workspace remote')
-      await kanbanIssueSyncAdapter(source.remote, source.command).setColumn(issue, column)
+    const syncIssueColumn = async (workspaceLookup, card, column) => {
+      if (card.issue === '') return
+      const key = syncRecordKey(workspaceLookup.workspaceId, card.id)
+      try {
+        const source = await issueRemote(workspaceLookup.workspace)
+        if (source.remote.platform === 'none') throw new Error('linked Issue has no supported Workspace remote')
+        await kanbanIssueSyncAdapter(source.remote, source.command).setColumn(card.issue, column)
+        const previous = issueSyncTable.get(key) || emptySyncRecord(card.issue)
+        const at = new Date().toISOString()
+        await putSyncRecord(key, {
+          ...previous, issue: card.issue, error: '', lastAttemptAt: at, lastSuccessAt: at,
+        })
+      } catch (error) {
+        await storeSyncFailure(key, card.issue, error)
+      }
     }
+
+    let issueSyncRevision = 0
+    const syncRecordKey = (workspaceId, ticketId) => String(workspaceId) + '/' + String(ticketId)
+    const putSyncRecord = async (key, record) => {
+      const previous = issueSyncTable.get(key)
+      const revisionFields = (value) => value === undefined ? null : {
+        issue: value.issue, comments: value.comments, blockers: value.blockers, error: value.error,
+      }
+      if (JSON.stringify(revisionFields(previous)) !== JSON.stringify(revisionFields(record))) issueSyncRevision += 1
+      await issueSyncTable.put(key, record)
+    }
+    const emptySyncRecord = (issue) => ({
+      issue, comments: [], blockers: [], error: '', lastAttemptAt: '', lastSuccessAt: '',
+    })
+    const storeSyncFailure = async (key, issue, error, projection) => {
+      const previous = issueSyncTable.get(key) || emptySyncRecord(issue)
+      await putSyncRecord(key, {
+        issue,
+        comments: projection ? projection.comments : previous.comments,
+        blockers: projection ? projection.blockers : previous.blockers,
+        error: String((error && error.message) || error),
+        lastAttemptAt: new Date().toISOString(),
+        lastSuccessAt: previous.lastSuccessAt,
+      })
+    }
+    const storeSyncSuccess = async (key, issue, projection) => {
+      const at = new Date().toISOString()
+      const record = {
+        issue,
+        comments: projection.comments,
+        blockers: projection.blockers,
+        error: '',
+        lastAttemptAt: at,
+        lastSuccessAt: at,
+      }
+      await putSyncRecord(key, record)
+      return record
+    }
+    const refreshIssueProjection = async (workspaceLookup, card, writeBoardState = true) => {
+      if (card.issue === '') return undefined
+      const key = syncRecordKey(workspaceLookup.workspaceId, card.id)
+      let projection
+      try {
+        const source = await issueRemote(workspaceLookup.workspace)
+        if (source.remote.platform === 'none') throw new Error('linked Issue has no supported Workspace remote')
+        const adapter = kanbanIssueSyncAdapter(source.remote, source.command)
+        projection = await adapter.read(card.issue)
+        if (writeBoardState) {
+          await adapter.setColumn(card.issue, card.column)
+          return storeSyncSuccess(key, card.issue, projection)
+        }
+        const previous = issueSyncTable.get(key) || emptySyncRecord(card.issue)
+        const record = {
+          ...previous,
+          issue: card.issue,
+          comments: projection.comments,
+          blockers: projection.blockers,
+          lastAttemptAt: new Date().toISOString(),
+        }
+        await putSyncRecord(key, record)
+        return record
+      } catch (error) {
+        await storeSyncFailure(key, card.issue, error, projection)
+        return issueSyncTable.get(key)
+      }
+    }
+    const syncLinkedTicket = async (workspaceLookup, card, source) => {
+      const key = syncRecordKey(workspaceLookup.workspaceId, card.id)
+      let projection
+      try {
+        if (source.remote.platform === 'none') throw new Error('linked Issue has no supported Workspace remote')
+        const adapter = kanbanIssueSyncAdapter(source.remote, source.command)
+        projection = await adapter.read(card.issue)
+        await enqueueMove(async () => {
+          const loaded = await readTicket(ticketsDir(workspaceLookup.workspace), card.file)
+          if (loaded.error !== undefined) throw new Error(loaded.error)
+          const latest = parseTicketFile(card.file, loaded.text)
+          if (!latest || kanbanIssueLinkKey(latest.issue) !== kanbanIssueLinkKey(card.issue)) return
+          const text = kanbanApplyRemoteText(loaded.text, projection)
+          if (text !== loaded.text) {
+            await fs.writeText(loaded.target, text)
+            issueSyncRevision += 1
+          }
+          const current = parseTicketFile(card.file, text)
+          await adapter.setColumn(current.issue, current.column)
+          if (current.column === 'done') {
+            await adapter.complete(current.issue, current.reviewUrl || current.mergeSha)
+          }
+          await storeSyncSuccess(key, current.issue, projection)
+        })
+      } catch (error) {
+        await storeSyncFailure(key, card.issue, error, projection)
+      }
+    }
+    let issueSweepRunning
+    const sweepIssueSync = () => {
+      if (issueSweepRunning !== undefined) return issueSweepRunning
+      issueSweepRunning = (async () => {
+        const liveKeys = new Set()
+        for (const workspace of registry.list()) {
+          const workspaceId = String(workspace.id)
+          const lookup = { workspaceId, workspace }
+          const linked = (await readBoardCards(lookup)).filter((card) => card.issue !== '')
+          if (linked.length === 0) continue
+          let source
+          try { source = await issueRemote(workspace) } catch (error) {
+            for (const card of linked) {
+              const key = syncRecordKey(workspaceId, card.id)
+              liveKeys.add(key)
+              await storeSyncFailure(key, card.issue, error)
+            }
+            continue
+          }
+          for (const card of linked) {
+            const key = syncRecordKey(workspaceId, card.id)
+            liveKeys.add(key)
+            await syncLinkedTicket(lookup, card, source)
+          }
+        }
+        for (const key of issueSyncTable.keys()) {
+          if (!liveKeys.has(String(key))) {
+            await issueSyncTable.delete(key)
+            issueSyncRevision += 1
+          }
+        }
+      })().finally(() => { issueSweepRunning = undefined })
+      return issueSweepRunning
+    }
+
+    ctx.effect(() => {
+      const timer = setInterval(() => {
+        void sweepIssueSync().catch((error) => {
+          console.error('kanban periodic Issue sync failed: ' + String((error && error.message) || error))
+        })
+      }, 30000)
+      return () => clearInterval(timer)
+    }, 'kanban.issueSyncTimer')
 
     // issue.import.list({ workspaceId }) lists open remote Issues. Linked
     // Issues remain visible with imported=true, so the dialog can explain why
@@ -830,11 +1031,15 @@ return {
           return await enqueueMove(async () => {
             const loaded = await readTicket(dirPath, String((args && args.file) || ''))
             if (loaded.error !== undefined) return { ok: false, error: loaded.error }
+            const card = parseTicketFile(String(args.file), loaded.text)
+            if (card === null) return { ok: false, error: 'not-a-ticket-file' }
             const blocked = String((args && args.blocked) || '').trim()
-            let text = kanbanSetAttr(loaded.text, 'title', title)
+            const ownedTitle = card.issue === '' ? title : card.title
+            const ownedBody = card.issue === '' ? String((args && args.body) || '') : card.body
+            let text = kanbanSetAttr(loaded.text, 'title', ownedTitle)
             text = kanbanSetAttr(text, 'blocked', blocked === '' ? null : blocked)
             text = kanbanSetAttr(text, 'base', args && args.base === 'head' ? 'head' : null)
-            text = kanbanSetBody(text, String((args && args.body) || ''))
+            text = kanbanSetBody(text, ownedBody)
             if (text === null) return { ok: false, error: 'not-a-ticket-file' }
             await fs.writeText(loaded.target, text)
             return { ok: true, file: String(args.file) }
@@ -862,6 +1067,7 @@ return {
           const card = parseTicketFile(file, loaded.text)
           if (card === null) return { ok: false, error: 'not-a-ticket-file' }
           if (card.column !== 'backlog') return { ok: false, error: 'ticket-not-in-backlog' }
+          if (card.issue !== '') return { ok: false, error: 'linked-ticket-text-owned-by-issue' }
 
           const catalog = await skills.list({ cwd: workspaceLookup.workspace.path })
           const available = catalog.some((skill) =>
@@ -964,6 +1170,8 @@ return {
           const file = String((args && args.file) || '')
           const loaded = await readTicket(ticketsDir(lookup.workspace), file)
           if (loaded.error) throw new Error(loaded.error)
+          const card = parseTicketFile(file, loaded.text)
+          if (card && card.issue !== '') throw new Error('linked-ticket-requires-remote-completion')
           return { ok: true, ...await kanbanLocalReview({ file, text: loaded.text, workspacePath: lookup.workspace.path }, completionGit(lookup.workspace)) }
         })
       } catch (error) { return { ok: false, error: 'ticket-review-failed: ' + String(error.message || error) } }
@@ -978,6 +1186,7 @@ return {
           const loaded = await readTicket(ticketsDir(lookup.workspace), file)
           if (loaded.error) throw new Error(loaded.error)
           const card = parseTicketFile(file, loaded.text)
+          if (card && card.issue !== '') throw new Error('linked-ticket-requires-remote-completion')
           const agent = agents.get(card.sessionId)
           let handle
           if (agent !== undefined) {
@@ -1174,7 +1383,7 @@ return {
             throw new Error(String(error.message || error) + (failures.length ? '; rollback failed: ' + failures.join('; ') : ''))
           }
           cleanupConfirmations.delete(key)
-          await syncIssueColumn(lookup.workspace, card.issue, 'ready')
+          await syncIssueColumn(lookup, card, 'ready')
           await pumpQueue(lookup).catch(logPumpFailure)
           return { ok: true, column: 'ready' }
         })
@@ -1210,7 +1419,7 @@ return {
               },
             )
             const card = parseTicketFile(file, loaded.text)
-            await syncIssueColumn(workspaceLookup.workspace, card.issue, result.column)
+            await syncIssueColumn(workspaceLookup, card, result.column)
             return { ok: true, ...result }
           })
         } catch (err) {

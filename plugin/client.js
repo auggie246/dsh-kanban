@@ -73,7 +73,7 @@ return {
       finished: 'Finished',
     }
     const WATCH_POLL_MS = 5000
-    const watchSummary = { value: { count: 0, tickets: [] }, listeners: new Set() }
+    const watchSummary = { value: { count: 0, tickets: [], syncRevision: 0 }, listeners: new Set() }
     const watchChanges = { value: 0, listeners: new Set() }
     const useWatchVersion = () => useStoreValue(watchChanges)
 
@@ -88,6 +88,7 @@ return {
               const next = {
                 count: typeof reply.count === 'number' ? reply.count : 0,
                 tickets: Array.isArray(reply.tickets) ? reply.tickets : [],
+                syncRevision: typeof reply.syncRevision === 'number' ? reply.syncRevision : 0,
               }
               const json = JSON.stringify(next)
               if (json === lastJson) return
@@ -222,7 +223,30 @@ return {
         card.blocked === ''
           ? null
           : h('div', { className: 'kanban-card-blocked', title: card.blocked }, 'Blocked — ' + card.blocked),
-        card.column === 'backlog'
+        !Array.isArray(card.issueBlockers) || card.issueBlockers.length === 0
+          ? null
+          : h('div', { className: 'kanban-card-issue-blockers' },
+              h('div', { className: 'kanban-card-issue-blockers-title' }, 'Native blockers'),
+              card.issueBlockers.map((blocker) => h('a', {
+                key: blocker.id || blocker.url,
+                href: blocker.url,
+                target: '_blank',
+                rel: 'noreferrer',
+                onClick: (event) => event.stopPropagation(),
+              }, '#' + String(blocker.number) + ' ' + blocker.title))),
+        !card.sync || card.sync.status !== 'error'
+          ? null
+          : h('div', { className: 'kanban-card-sync-error', role: 'status', title: card.sync.error },
+              'Sync failed — ' + card.sync.error),
+        !Array.isArray(card.issueComments) || card.issueComments.length === 0
+          ? null
+          : h('details', { className: 'kanban-card-issue-comments', onClick: (event) => event.stopPropagation() },
+              h('summary', null, 'Issue comments (' + String(card.issueComments.length) + ')'),
+              card.issueComments.map((comment) => h('div', { className: 'kanban-card-issue-comment', key: comment.id || comment.url },
+                h('div', { className: 'kanban-card-issue-comment-author' }, comment.author || 'Issue commenter'),
+                h('div', { className: 'kanban-card-issue-comment-body' }, comment.body),
+                comment.url ? h('a', { href: comment.url, target: '_blank', rel: 'noreferrer' }, 'Open comment') : null))),
+        card.column === 'backlog' && card.issue === ''
           ? h(
               'button',
               {
@@ -279,7 +303,7 @@ return {
             h('button', { key: action, className: 'kanban-btn', type: 'button',
               onClick: (event) => { event.stopPropagation(); props.onRecover(card, action) },
             }, label))) : null,
-        card.column === 'in-review'
+        card.column === 'in-review' && card.issue === ''
           ? h(LocalReviewPanel, { card, workspaceId: props.workspaceId, onSaved: props.onSaved }) : null,
         card.column === 'in-review'
           ? h(
@@ -371,6 +395,7 @@ return {
     // on title edits (the slug is fixed at creation).
     function TicketDialog(props) {
       const editing = props.mode === 'edit'
+      const remoteOwned = editing && props.card.issue !== ''
       const [title, setTitle] = React.useState(editing ? props.card.title : '')
       const [body, setBody] = React.useState(editing ? props.card.body : '')
       const [blocked, setBlocked] = React.useState(editing ? props.card.blocked : '')
@@ -425,22 +450,24 @@ return {
           h(
             'label',
             { className: 'kanban-field' },
-            h('span', { className: 'kanban-field-label' }, 'Title'),
+            h('span', { className: 'kanban-field-label' }, remoteOwned ? 'Title (owned by linked Issue)' : 'Title'),
             h('input', {
               className: 'kanban-input',
               type: 'text',
               value: title,
               autoFocus: true,
+              readOnly: remoteOwned,
               onChange: (event) => setTitle(event.target.value),
             }),
           ),
           h(
             'label',
             { className: 'kanban-field' },
-            h('span', { className: 'kanban-field-label' }, 'Body'),
+            h('span', { className: 'kanban-field-label' }, remoteOwned ? 'Body (owned by linked Issue)' : 'Body'),
             h('textarea', {
               className: 'kanban-textarea',
               value: body,
+              readOnly: remoteOwned,
               placeholder: 'Goal, context, acceptance criteria — markdown.',
               onChange: (event) => setBody(event.target.value),
             }),
@@ -1196,6 +1223,16 @@ return {
       '.kanban-card-blocked{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-state-error-primary);border:1px solid var(--dsw-alias-state-error-primary);',
       'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.kanban-card-issue-blockers,.kanban-card-sync-error{margin-top:6px;padding:6px;font-size:11px;',
+      'color:var(--dsw-alias-state-error-primary);border:1px solid var(--dsw-alias-state-error-primary);border-radius:4px;}',
+      '.kanban-card-issue-blockers-title{font-weight:600;margin-bottom:3px;}',
+      '.kanban-card-issue-blockers a{display:block;color:inherit;}',
+      '.kanban-card-issue-comments{margin-top:7px;font-size:11px;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-card-issue-comments summary{cursor:pointer;font-weight:600;}',
+      '.kanban-card-issue-comment{margin-top:5px;padding-top:5px;border-top:1px solid var(--dsw-alias-border-l1);}',
+      '.kanban-card-issue-comment-author{font-weight:600;}',
+      '.kanban-card-issue-comment-body{white-space:pre-wrap;overflow-wrap:anywhere;}',
+      '.kanban-card-issue-comment a{color:var(--dsw-alias-brand-primary);}',
       '.kanban-card-queued{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l1);',
       'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',

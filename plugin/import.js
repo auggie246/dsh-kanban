@@ -1,5 +1,5 @@
-// Remote Issue import helpers. Concatenate after completion.js and before
-// host.js. Plain JavaScript only.
+// Remote Issue integration helpers. Concatenate after completion.js and
+// before host.js. Plain JavaScript only.
 
 function kanbanIssueImportAdapter(remote, command) {
   if (!remote || (remote.platform !== 'github' && remote.platform !== 'gitlab')) {
@@ -63,11 +63,6 @@ function kanbanIssueSyncAdapter(remote, command) {
   const parseJson = (text, kind) => {
     try { return JSON.parse(String(text || '')) } catch { throw new Error(remote.platform + '-' + kind + '-invalid-json') }
   }
-  const labelsFrom = (text) => {
-    const value = parseJson(text, 'issue')
-    if (!value || !Array.isArray(value.labels)) throw new Error(remote.platform + '-issue-invalid-response')
-    return labelNames(value.labels)
-  }
   const ensureLabel = async (target) => {
     if (remote.platform === 'github') {
       const values = parseJson((await command([
@@ -90,28 +85,156 @@ function kanbanIssueSyncAdapter(remote, command) {
       }
     }
   }
+  const project = remote.repo.split('/').slice(1).join('/')
+  const normalizeState = (state) => {
+    const value = String(state || '').toLowerCase()
+    return value === 'opened' ? 'open' : value
+  }
+  const normalizeComment = (comment) => ({
+    id: String(comment && comment.id || ''),
+    author: String(comment && comment.author && (comment.author.login || comment.author.username) || ''),
+    body: String(comment && comment.body || ''),
+    url: String(comment && (comment.url || comment.web_url) || ''),
+    createdAt: String(comment && (comment.createdAt || comment.created_at) || ''),
+  })
+  const normalizeBlocker = (issue) => ({
+    id: String(issue && issue.id || ''),
+    number: Number(issue && (issue.number || issue.iid)),
+    title: String(issue && issue.title || ''),
+    url: String(issue && (issue.url || issue.web_url) || ''),
+    state: normalizeState(issue && issue.state),
+  })
   return {
+    async read(issueUrl) {
+      const number = issueNumber(issueUrl)
+      if (remote.platform === 'github') {
+        const issue = parseJson((await command([
+          'gh', 'issue', 'view', issueUrl, '--repo', remote.repo,
+          '--json', 'title,body,state,comments,labels,blockedBy',
+        ])).text, 'issue')
+        if (!issue || !Array.isArray(issue.comments) || !Array.isArray(issue.labels) ||
+            !issue.blockedBy || !Array.isArray(issue.blockedBy.nodes)) {
+          throw new Error('github-issue-invalid-response')
+        }
+        return {
+          title: String(issue.title || ''),
+          body: String(issue.body || ''),
+          state: normalizeState(issue.state),
+          labels: labelNames(issue.labels),
+          comments: issue.comments.map(normalizeComment),
+          blockers: issue.blockedBy.nodes.map(normalizeBlocker),
+        }
+      }
+      const root = 'projects/' + encodeURIComponent(project) + '/issues/' + number
+      const issue = parseJson((await command(['glab', 'api', root])).text, 'issue')
+      const notes = parseJson((await command(['glab', 'api', root + '/notes', '--paginate'])).text, 'issue-comments')
+      const links = parseJson((await command(['glab', 'api', root + '/links', '--paginate'])).text, 'issue-links')
+      if (!issue || !Array.isArray(issue.labels) || !Array.isArray(notes) || !Array.isArray(links)) {
+        throw new Error('gitlab-issue-invalid-response')
+      }
+      return {
+        title: String(issue.title || ''),
+        body: String(issue.description || ''),
+        state: normalizeState(issue.state),
+        labels: labelNames(issue.labels),
+        comments: notes.filter((note) => note && note.system !== true).map(normalizeComment),
+        blockers: links.filter((link) => link && link.link_type === 'is_blocked_by').map(normalizeBlocker),
+      }
+    },
     async setColumn(issueUrl, column) {
       const target = 'kanban:' + String(column || '')
       const number = issueNumber(issueUrl)
       await ensureLabel(target)
       const viewArgs = remote.platform === 'github'
-        ? ['gh', 'issue', 'view', issueUrl, '--repo', remote.repo, '--json', 'labels']
+        ? ['gh', 'issue', 'view', issueUrl, '--repo', remote.repo, '--json', 'labels,state']
         : ['glab', 'issue', 'view', number, '--repo', remote.repo, '--output', 'json']
-      const labels = labelsFrom((await command(viewArgs)).text)
+      const issue = parseJson((await command(viewArgs)).text, 'issue')
+      if (!issue || !Array.isArray(issue.labels)) throw new Error(remote.platform + '-issue-invalid-response')
+      const labels = labelNames(issue.labels)
       const stale = labels.filter((label) => label.startsWith('kanban:') && label !== target)
       const hasTarget = labels.includes(target)
-      if (hasTarget && stale.length === 0) return
-      const editArgs = remote.platform === 'github'
-        ? ['gh', 'issue', 'edit', issueUrl, '--repo', remote.repo]
-        : ['glab', 'issue', 'update', number, '--repo', remote.repo]
-      if (!hasTarget) editArgs.push(remote.platform === 'github' ? '--add-label' : '--label', target)
-      if (stale.length > 0) {
-        editArgs.push(remote.platform === 'github' ? '--remove-label' : '--unlabel', stale.join(','))
+      if (!hasTarget || stale.length > 0) {
+        const editArgs = remote.platform === 'github'
+          ? ['gh', 'issue', 'edit', issueUrl, '--repo', remote.repo]
+          : ['glab', 'issue', 'update', number, '--repo', remote.repo]
+        if (!hasTarget) editArgs.push(remote.platform === 'github' ? '--add-label' : '--label', target)
+        if (stale.length > 0) {
+          editArgs.push(remote.platform === 'github' ? '--remove-label' : '--unlabel', stale.join(','))
+        }
+        await command(editArgs)
       }
-      await command(editArgs)
+      if (column !== 'done' && normalizeState(issue.state) === 'closed') {
+        await command(remote.platform === 'github'
+          ? ['gh', 'issue', 'reopen', issueUrl, '--repo', remote.repo]
+          : ['glab', 'issue', 'reopen', number, '--repo', remote.repo])
+      }
+    },
+    async complete(issueUrl, reviewUrl) {
+      const number = issueNumber(issueUrl)
+      const reference = String(reviewUrl || '').trim()
+      if (reference === '') throw new Error('completion-review-url-required')
+      const marker = '<!-- dsh-kanban-completion:' + reference + ' -->'
+      const message = 'Completed by merged PR/MR: ' + reference + '\n\n' + marker
+      if (remote.platform === 'github') {
+        const value = parseJson((await command([
+          'gh', 'issue', 'view', issueUrl, '--repo', remote.repo, '--json', 'state,comments',
+        ])).text, 'issue')
+        if (!value || !Array.isArray(value.comments)) throw new Error('github-issue-invalid-response')
+        const hasComment = value.comments.some((comment) => String(comment && comment.body || '').includes(marker))
+        const open = String(value.state || '').toLowerCase() !== 'closed'
+        if (!hasComment && open) {
+          await command(['gh', 'issue', 'close', issueUrl, '--repo', remote.repo, '--comment', message])
+          return
+        }
+        if (!hasComment) await command(['gh', 'issue', 'comment', issueUrl, '--repo', remote.repo, '--body', message])
+        if (open) await command(['gh', 'issue', 'close', issueUrl, '--repo', remote.repo])
+        return
+      }
+      const issue = parseJson((await command([
+        'glab', 'issue', 'view', number, '--repo', remote.repo, '--output', 'json',
+      ])).text, 'issue')
+      const notes = parseJson((await command([
+        'glab', 'api', 'projects/' + encodeURIComponent(project) + '/issues/' + number + '/notes', '--paginate',
+      ])).text, 'issue-comments')
+      if (!Array.isArray(notes)) throw new Error('gitlab-issue-comments-invalid-response')
+      if (!notes.some((note) => String(note && note.body || '').includes(marker))) {
+        await command(['glab', 'issue', 'note', number, '--repo', remote.repo, '--message', message])
+      }
+      if (String(issue && issue.state || '').toLowerCase() !== 'closed') {
+        await command(['glab', 'issue', 'close', number, '--repo', remote.repo])
+      }
     },
   }
+}
+
+const kanbanIssueSyncRecordSchema = {
+  parse(value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Issue sync record must be an object')
+    }
+    const comments = Array.isArray(value.comments) ? value.comments : []
+    const blockers = Array.isArray(value.blockers) ? value.blockers : []
+    if (typeof value.issue !== 'string' || typeof value.error !== 'string' ||
+        typeof value.lastAttemptAt !== 'string' || typeof value.lastSuccessAt !== 'string' ||
+        comments.some((entry) => !entry || typeof entry.body !== 'string') ||
+        blockers.some((entry) => !entry || typeof entry.title !== 'string' || typeof entry.state !== 'string')) {
+      throw new Error('Issue sync record is malformed')
+    }
+    return {
+      issue: value.issue,
+      comments: comments.map((entry) => ({
+        id: String(entry.id || ''), author: String(entry.author || ''), body: entry.body,
+        url: String(entry.url || ''), createdAt: String(entry.createdAt || ''),
+      })),
+      blockers: blockers.map((entry) => ({
+        id: String(entry.id || ''), number: Number(entry.number), title: entry.title,
+        url: String(entry.url || ''), state: entry.state,
+      })),
+      error: value.error,
+      lastAttemptAt: value.lastAttemptAt,
+      lastSuccessAt: value.lastSuccessAt,
+    }
+  },
 }
 
 function kanbanIssueLinkKey(value) {

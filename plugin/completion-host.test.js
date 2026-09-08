@@ -83,6 +83,24 @@ async function openCompletionBoard(t, options = {}) {
   }
 }
 
+test('linked Tickets cannot use local review or Accept instead of remote completion', async (t) => {
+  const board = await openCompletionBoard(t)
+  const linked = fs.readFileSync(board.ticketPath, 'utf8').replace(
+    'column: in-review\n',
+    'column: in-review\nissue: "https://github.com/o/r/issues/12"\n',
+  )
+  fs.writeFileSync(board.ticketPath, linked)
+
+  const review = await board.call('ticket.review')
+  const accepted = await board.call('ticket.accept', { review: {} })
+
+  assert.equal(review.ok, false)
+  assert.match(review.error, /linked-ticket-requires-remote-completion/)
+  assert.equal(accepted.ok, false)
+  assert.match(accepted.error, /linked-ticket-requires-remote-completion/)
+  assert.match(fs.readFileSync(board.ticketPath, 'utf8'), /column: in-review/)
+})
+
 test('review reports merge conflicts without changing the base or leaving a merge in progress', async (t) => {
   const board = await openCompletionBoard(t)
   fs.writeFileSync(board.root + '/login.txt', 'different login\n')

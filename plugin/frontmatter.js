@@ -190,6 +190,17 @@ function kanbanSetBody(text, body) {
   return next
 }
 
+function kanbanApplyRemoteText(text, remote) {
+  if (!remote || typeof remote.title !== 'string' || typeof remote.body !== 'string') {
+    throw new Error('Remote Issue text is required')
+  }
+  let next = kanbanSetAttr(text, 'title', remote.title)
+  if (next === null) throw new Error('not-a-ticket-file')
+  next = kanbanSetBody(next, remote.body)
+  if (next === null) throw new Error('not-a-ticket-file')
+  return next
+}
+
 function kanbanNormalizeColumn(value) {
   const c = String(value || '').trim().toLowerCase()
   return KANBAN_COLUMNS.includes(c) ? c : 'backlog'
@@ -230,5 +241,6 @@ if (typeof module !== 'undefined' && module.exports) {
     serializeTicketFile,
     kanbanSetAttr,
     kanbanSetBody,
+    kanbanApplyRemoteText,
   }
 }
