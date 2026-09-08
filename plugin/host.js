@@ -313,6 +313,7 @@ return {
           queuedText = kanbanSetAttr(queuedText, 'queued', new Date().toISOString())
           if (queuedText === null) return { ok: false, error: 'not-a-ticket-file' }
           await fs.writeText(loaded.target, queuedText)
+          await syncIssueColumn(workspaceLookup.workspace, card.issue, column)
           // The queue head may now have a free slot (issue #5 keeps the
           // queue strictly FIFO — the moved Ticket never jumps it).
           await pumpQueue(workspaceLookup).catch(logPumpFailure)
@@ -343,6 +344,7 @@ return {
             setTicketAttr: kanbanSetAttr,
           }),
         )
+        await syncIssueColumn(workspaceLookup.workspace, card.issue, column)
         return { ok: true, file, column, ...linkage }
       }
 
@@ -350,6 +352,7 @@ return {
       if (kanbanIsQueued(card)) text = kanbanSetAttr(text, 'queued', null)
       if (text === null) return { ok: false, error: 'not-a-ticket-file' }
       await fs.writeText(loaded.target, text)
+      await syncIssueColumn(workspaceLookup.workspace, card.issue, column)
       await pumpQueue(workspaceLookup).catch(logPumpFailure)
       return { ok: true, file, column }
     }
@@ -602,6 +605,7 @@ return {
                   },
                 })
                 if (completed.merged) {
+                  if (current.issue !== '') await kanbanIssueSyncAdapter(remote, command).setColumn(current.issue, 'done')
                   await executionTable.delete(workspaceId + '/' + current.id)
                   invalidateWatch(current.sessionId)
                   await pumpQueue(lookup).catch(logPumpFailure)
@@ -706,19 +710,29 @@ return {
     }
 
     const noIssueRemoteMessage = 'No GitHub or GitLab remote exists for this Workspace.'
-    const issueImportSource = async (workspace) => {
+    const issueRemote = async (workspace) => {
       const command = (args, allowed = [0]) => kanbanRunHostCommand(shell, workspace.path, args, {
         allowedExitCodes: allowed, timeoutMs: 30000, stdoutMaxBytes: 1048576,
       })
-      const importGit = (args, allowed = [0]) => kanbanRunHostGit(shell, workspace.path, args, {
+      const issueGit = (args, allowed = [0]) => kanbanRunHostGit(shell, workspace.path, args, {
         allowedExitCodes: args.length === 1 && args[0] === 'remote' ? [0, 128] : allowed,
       })
       const remote = await kanbanDetectRemote(
-        importGit,
+        issueGit,
         (location) => kanbanProbeRemotePlatform(location, command),
       )
-      if (remote.platform === 'none') return { remote, issues: [] }
-      return { remote, issues: await kanbanIssueImportAdapter(remote, command).listOpen() }
+      return { remote, command }
+    }
+    const issueImportSource = async (workspace) => {
+      const source = await issueRemote(workspace)
+      if (source.remote.platform === 'none') return { remote: source.remote, issues: [] }
+      return { remote: source.remote, issues: await kanbanIssueImportAdapter(source.remote, source.command).listOpen() }
+    }
+    const syncIssueColumn = async (workspace, issue, column) => {
+      if (issue === '') return
+      const source = await issueRemote(workspace)
+      if (source.remote.platform === 'none') throw new Error('linked Issue has no supported Workspace remote')
+      await kanbanIssueSyncAdapter(source.remote, source.command).setColumn(issue, column)
     }
 
     // issue.import.list({ workspaceId }) lists open remote Issues. Linked
@@ -1160,6 +1174,7 @@ return {
             throw new Error(String(error.message || error) + (failures.length ? '; rollback failed: ' + failures.join('; ') : ''))
           }
           cleanupConfirmations.delete(key)
+          await syncIssueColumn(lookup.workspace, card.issue, 'ready')
           await pumpQueue(lookup).catch(logPumpFailure)
           return { ok: true, column: 'ready' }
         })
@@ -1194,6 +1209,8 @@ return {
                 },
               },
             )
+            const card = parseTicketFile(file, loaded.text)
+            await syncIssueColumn(workspaceLookup.workspace, card.issue, result.column)
             return { ok: true, ...result }
           })
         } catch (err) {
