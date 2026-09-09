@@ -114,6 +114,7 @@ test('moving a Ready Ticket starts isolated work from the remote default branch'
       ticketSlug: 'fix-login',
       ticketText: '---\nid: KAN-101\ntitle: Fix login\ncolumn: ready\n---\nImplement the login fix.\n',
       baseMode: 'remote',
+      autopilot: true,
     },
     adapter,
   )
@@ -127,7 +128,9 @@ test('moving a Ready Ticket starts isolated work from the remote default branch'
   assert.equal(fs.existsSync(path.join(result.worktreePath, 'local-only.txt')), false)
   assert.equal(fs.readFileSync(path.join(repo.workspace, 'local-only.txt'), 'utf8'), 'local head\n')
   assert.equal(fs.readFileSync(path.join(repo.workspace, '.gitignore'), 'utf8'), '.dsh-kanban/worktrees/\n')
-  assert.deepEqual(adapter.observed.sessions, [{ sessionId: result.sessionId, cwd: result.worktreePath }])
+  assert.deepEqual(adapter.observed.sessions, [
+    { sessionId: result.sessionId, cwd: result.worktreePath, autopilot: true },
+  ])
   assert.equal(
     adapter.observed.ticketLinks[0],
     '---\nid: KAN-101\ntitle: Fix login\ncolumn: in-progress\nbranch: kanban/KAN-101-fix-login\nworktreePath: ' +

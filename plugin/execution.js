@@ -15,13 +15,14 @@ function kanbanExecutionInput(request) {
   const ticketText = String(request.ticketText || '')
   const issueUrl = String(request.issueUrl || '').trim()
   const baseMode = request.baseMode === 'head' ? 'head' : 'remote'
+  const autopilot = request.autopilot === true
   if (workspaceId === '') throw new Error('Ticket execution requires a Workspace id')
   if (workspacePath === '') throw new Error('Ticket execution requires a Workspace path')
   if (!/^KAN-\d+$/.test(ticketId)) throw new Error('Ticket execution requires a KAN id')
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(ticketSlug) || ticketSlug.length > 40) {
     throw new Error('Ticket execution requires a valid Ticket slug')
   }
-  return { workspaceId, workspacePath, ticketId, ticketSlug, ticketText, issueUrl, baseMode }
+  return { workspaceId, workspacePath, ticketId, ticketSlug, ticketText, issueUrl, baseMode, autopilot }
 }
 
 function kanbanEnsureIgnoreLine(text, line) {
@@ -121,7 +122,15 @@ function kanbanHostExecutionAdapter(deps) {
         sessionId: spec.sessionId,
         meta: { cwd: spec.cwd, agentPreset: preset.id },
         agentOptions: { provider: selection.provider, model: selection.model },
-        setup: (agentCtx) => deps.agentPresets.mount(agentCtx, preset.id),
+        setup: async (agentCtx) => {
+          await deps.agentPresets.mount(agentCtx, preset.id)
+          // Setup runs before publication, so no observer can drive the Agent
+          // Session before its Board-owned Autopilot policy is pinned.
+          if (spec.autopilot) {
+            agentCtx.agent.session.append('sandbox/mode', { mode: 'workspace-write' })
+            agentCtx.agent.session.append('approval/policy', { policy: 'never' })
+          }
+        },
       })
       if (deps.rememberSession) deps.rememberSession(handle)
       await handle.agent.whenIdle()
@@ -226,7 +235,7 @@ async function kanbanStartTicketExecution(request, adapter) {
   try {
     await adapter.runGit(['worktree', 'add', '-b', branch, relativeWorktreePath, baseRef])
     worktreeCreated = true
-    session = await adapter.createSession({ sessionId, cwd: worktreePath })
+    session = await adapter.createSession({ sessionId, cwd: worktreePath, autopilot: input.autopilot })
     await adapter.persistTicket(linkedTicketText)
     ticketPersisted = true
     await adapter.persistLinkage(linkageKey, linkage)

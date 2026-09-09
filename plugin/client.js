@@ -760,6 +760,7 @@ return {
 
       const tickets = result === null ? [] : result.tickets
       const wipLimit = result === null ? null : result.wipLimit
+      const autopilot = result !== null && result.autopilot === true
       const runningCount = tickets.filter((ticket) => ticket.column === 'in-progress' && !isQueued(ticket)).length
       const queuedCount = tickets.filter(isQueued).length
 
@@ -915,6 +916,12 @@ return {
           workspace === undefined
             ? null
             : h('span', { className: 'kanban-board-workspace' }, workspace.title + ' — ' + workspace.path),
+          autopilot
+            ? h('span', {
+                className: 'kanban-autopilot-indicator',
+                title: 'Board-spawned Ticket sessions use workspace-write without approval prompts.',
+              }, 'Autopilot on')
+            : null,
           workspaceId === undefined
             ? null
             : h(React.Fragment, null,
@@ -1039,10 +1046,10 @@ return {
         }
       }, [workspaceKey, boardVersion])
 
-      const updateDraft = (workspaceId, value) => {
+      const updateDraft = (workspaceId, changes) => {
         setSavedId(null)
         setRows((current) =>
-          current.map((row) => (row.workspaceId === workspaceId ? { ...row, wipLimit: value } : row)),
+          current.map((row) => (row.workspaceId === workspaceId ? { ...row, ...changes } : row)),
         )
       }
 
@@ -1053,6 +1060,7 @@ return {
         host.call('board.settings.update', {
           workspaceId: row.workspaceId,
           wipLimit: row.wipLimit,
+          autopilot: row.autopilot,
         }).then(
           (reply) => {
             setSavingId(null)
@@ -1101,8 +1109,18 @@ return {
                   min: 1,
                   step: 1,
                   value: row.wipLimit,
-                  onChange: (event) => updateDraft(row.workspaceId, event.target.value),
+                  onChange: (event) => updateDraft(row.workspaceId, { wipLimit: event.target.value }),
                 }),
+              ),
+              h(
+                'label',
+                { className: 'kanban-settings-autopilot' },
+                h('input', {
+                  type: 'checkbox',
+                  checked: row.autopilot === true,
+                  onChange: (event) => updateDraft(row.workspaceId, { autopilot: event.target.checked }),
+                }),
+                h('span', null, 'Autopilot'),
               ),
               h(
                 'button',
@@ -1126,7 +1144,7 @@ return {
         h(
           'p',
           { className: 'kanban-settings-description' },
-          'Each Workspace keeps its own In Progress WIP limit.',
+          'Each Workspace keeps its own In Progress WIP limit. Autopilot lets new Ticket sessions write in their Worktree without approval prompts. It is off by default.',
         ),
         error === null ? null : h('div', { className: 'kanban-dialog-error' }, error),
         content,
@@ -1188,6 +1206,8 @@ return {
       '.kanban-board-name{font-size:15px;font-weight:600;}',
       '.kanban-board-workspace{flex:1;font-size:12px;color:var(--dsw-alias-label-secondary);',
       'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.kanban-autopilot-indicator{flex:none;padding:2px 8px;font-size:11px;font-weight:600;',
+      'color:var(--dsw-alias-state-success-primary);border:1px solid var(--dsw-alias-state-success-primary);border-radius:10px;}',
       '.kanban-close,.kanban-new-btn,.kanban-import-btn{padding:4px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;',
       'background:transparent;color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer;}',
       '.kanban-close:hover,.kanban-new-btn:hover,.kanban-import-btn:hover{background:var(--dsw-alias-bg-layer-1);}',
@@ -1291,7 +1311,8 @@ return {
       '.kanban-settings-title{font-size:13px;font-weight:600;}',
       '.kanban-settings-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
       'font-size:11px;color:var(--dsw-alias-label-secondary);}',
-      '.kanban-settings-limit{display:flex;align-items:center;gap:8px;font-size:12px;}',
+      '.kanban-settings-limit,.kanban-settings-autopilot{display:flex;align-items:center;gap:8px;font-size:12px;}',
+      '.kanban-settings-autopilot{white-space:nowrap;}',
       '.kanban-settings-input{width:72px;}',
     ].join('\n'))
   },

@@ -18,6 +18,7 @@ function kanbanWorkspaceSettings(workspace, stored) {
   return {
     path: workspace.path,
     wipLimit: storedLimit === null ? KANBAN_DEFAULT_WIP_LIMIT : storedLimit,
+    autopilot: stored !== undefined && stored.autopilot === true,
   }
 }
 
@@ -45,7 +46,10 @@ const kanbanSettingsRecordSchema = {
     if (typeof value.wipLimit !== 'number' || kanbanParseWipLimit(value.wipLimit) === null) {
       throw new Error('Board Workspace settings require a positive whole-number WIP limit')
     }
-    return { path: value.path, wipLimit: value.wipLimit }
+    if (value.autopilot !== undefined && typeof value.autopilot !== 'boolean') {
+      throw new Error('Board Workspace settings require an Autopilot boolean')
+    }
+    return { path: value.path, wipLimit: value.wipLimit, autopilot: value.autopilot === true }
   },
 }
 
@@ -53,6 +57,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     KANBAN_DEFAULT_WIP_LIMIT,
     kanbanParseWipLimit,
+    kanbanSettingsRecordSchema,
     kanbanWorkspaceSettingEntries,
     kanbanWorkspaceSettings,
   }

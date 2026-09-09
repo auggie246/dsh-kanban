@@ -213,9 +213,12 @@ errored, or finished. Clicking through opens the session.
 
 ### Autopilot
 
-A per-workspace, opt-in board setting that lets board-spawned Agent Sessions
-run with an elevated auto-approve policy for that Workspace only. Off by
-default; when off, approvals surface through the Attention Badge instead.
+A per-Workspace, opt-in Board setting for Board-spawned Ticket execution
+sessions. When enabled, each new execution or fresh retry pins `workspace-write`
+and the `never` approval policy before its first brief. This removes approval
+prompts without granting writes outside that Ticket's Worktree. It never changes
+Refinement Sessions, resumed sessions, or sessions the Board does not own. It is
+off by default; when off, approvals surface through the Attention Badge instead.
 
 ### Refinement Session
 

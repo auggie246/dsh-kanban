@@ -94,6 +94,7 @@ return {
       title: workspace.title,
       path: settings.path,
       wipLimit: settings.wipLimit,
+      autopilot: settings.autopilot,
     })
 
     const persistWorkspaceSettings = async (workspaceId, settings) => {
@@ -101,7 +102,8 @@ return {
       if (
         current === undefined ||
         current.path !== settings.path ||
-        current.wipLimit !== settings.wipLimit
+        current.wipLimit !== settings.wipLimit ||
+        current.autopilot !== settings.autopilot
       ) {
         await settingsTable.put(workspaceId, settings)
       }
@@ -200,10 +202,11 @@ return {
 
     // The durable WIP limit for one Workspace as stored right now; moves and
     // the queue pump read it without repairing the settings record.
-    const wipLimitFor = (workspaceLookup) => {
-      const stored = settingsTable.get(workspaceLookup.workspaceId)
-      return kanbanWorkspaceSettings(workspaceLookup.workspace, stored).wipLimit
-    }
+    const workspaceSettingsFor = (workspaceLookup) =>
+      kanbanWorkspaceSettings(workspaceLookup.workspace, settingsTable.get(workspaceLookup.workspaceId))
+
+    const wipLimitFor = (workspaceLookup) => workspaceSettingsFor(workspaceLookup).wipLimit
+    const autopilotFor = (workspaceLookup) => workspaceSettingsFor(workspaceLookup).autopilot
 
     // Scan a Workspace's Ticket Files into card data, repairing each card's
     // derived execution linkage while reading. A missing directory is an
@@ -275,6 +278,7 @@ return {
             ticketText: loaded.text,
             issueUrl: card.issue,
             baseMode: card.base,
+            autopilot: autopilotFor(workspaceLookup),
           },
           kanbanHostExecutionAdapter({
             workspace: workspaceLookup.workspace,
@@ -358,6 +362,7 @@ return {
             ticketText: loaded.text,
             issueUrl: card.issue,
             baseMode: card.base,
+            autopilot: autopilotFor(workspaceLookup),
           },
           kanbanHostExecutionAdapter({
             workspace: workspaceLookup.workspace,
@@ -586,6 +591,7 @@ return {
             workspaceId: workspaceLookup.workspaceId,
             workspaceTitle: workspaceLookup.workspace.title,
             wipLimit: boardSettings.wipLimit,
+            autopilot: boardSettings.autopilot,
             tickets,
           }
         } catch (err) {
@@ -714,18 +720,27 @@ return {
       }),
     )
 
-    // board.settings.update({ workspaceId, wipLimit }) → the committed record.
+    // board.settings.update({ workspaceId, wipLimit, autopilot }) → the committed record.
     ctx.effect(() =>
       harness.handle('board.settings.update', async (args) => {
         const workspaceId = args && typeof args.workspaceId === 'string' ? args.workspaceId : ''
         if (workspaceId === '') return { ok: false, error: 'workspaceId required' }
         const wipLimit = kanbanParseWipLimit(args && args.wipLimit)
         if (wipLimit === null) return { ok: false, error: 'wipLimit must be a positive whole number' }
+        const requestedAutopilot = args && args.autopilot
+        if (requestedAutopilot !== undefined && typeof requestedAutopilot !== 'boolean') {
+          return { ok: false, error: 'autopilot must be a boolean' }
+        }
         try {
           const view = await enqueueSettings(async () => {
             const workspace = registry.get(workspaceId)
             if (workspace === undefined) return undefined
-            const settings = { path: workspace.path, wipLimit }
+            const current = kanbanWorkspaceSettings(workspace, settingsTable.get(workspaceId))
+            const settings = {
+              path: workspace.path,
+              wipLimit,
+              autopilot: requestedAutopilot === undefined ? current.autopilot : requestedAutopilot,
+            }
             await settingsTable.put(workspaceId, settings)
             return settingsView(workspace, settings)
           })
@@ -1291,7 +1306,11 @@ return {
           const previous = executionTable.get(key)
           let session
           try {
-            session = await adapter.createSession({ sessionId, cwd: card.worktreePath })
+            session = await adapter.createSession({
+              sessionId,
+              cwd: card.worktreePath,
+              autopilot: autopilotFor(lookup),
+            })
             await adapter.persistTicket(kanbanSetAttr(loaded.text, 'sessionId', sessionId))
             await adapter.persistLinkage(key, {
               workspaceId: lookup.workspaceId, ticketId: card.id, sessionId,

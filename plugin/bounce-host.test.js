@@ -23,9 +23,15 @@ async function openBoard(t, options = {}) {
   const disposed = []
   const liveAgents = new Map()
   const gitCommands = []
+  const ambientPolicyEvents = []
   const agent = {
     id: 'session-review',
     status: options.status || 'idle',
+    session: {
+      header: { cwd: '/workspace/.dsh-kanban/worktrees/fix-login', agentPreset: 'test' },
+      append(type, data) { ambientPolicyEvents.push({ type, data }) },
+    },
+    policyEvents: ambientPolicyEvents,
     steer(message) {
       if (options.steerError) throw new Error('delivery failed')
       messages.push(message)
@@ -100,10 +106,17 @@ async function openBoard(t, options = {}) {
         if (!options.allowCreate) throw new Error('Bounce must not create another session')
         if (options.createError && created.length) throw new Error('spawn failed')
         if (created.some((entry) => entry.spec.sessionId === spec.sessionId)) throw new Error('session identity already persisted')
+        const policyEvents = []
         const next = {
           id: spec.sessionId, status: 'idle', whenIdle: async () => {},
+          session: {
+            header: { cwd: spec.meta.cwd, agentPreset: spec.meta.agentPreset },
+            append(type, data) { policyEvents.push({ type, data }) },
+          },
+          policyEvents,
           followup(message) { messages.push(message); next.status = 'running'; emit('agent/status', { agent: next, status: 'running' }) },
         }
+        if (spec.setup) await spec.setup({ agent: next })
         created.push({ spec, agent: next })
         liveAgents.set(next.id, next)
         return { agent: next, async dispose() {
@@ -139,6 +152,18 @@ async function openBoard(t, options = {}) {
     async settleSignals() { await new Promise((resolve) => setImmediate(resolve)) },
   }
 }
+
+test('Autopilot is off by default and persists per Workspace through Board methods', async (t) => {
+  const board = await openBoard(t)
+
+  const initial = await board.call('board.settings.list')
+  assert.equal(initial.workspaces[0].autopilot, false)
+
+  const updated = await board.call('board.settings.update', { wipLimit: 3, autopilot: true })
+  assert.equal(updated.ok, true, updated.error)
+  assert.equal(updated.autopilot, true)
+  assert.equal((await board.call('board.list')).autopilot, true)
+})
 
 test('an errored Ticket stays In Progress with a Stalled badge and the failure message', async (t) => {
   const board = await openBoard(t, { ticketText: reviewText.replace('in-review', 'in-progress') })
@@ -186,8 +211,32 @@ test('Resume steers the same Stalled session and clears its badge without changi
   assert.equal((await board.call('ticket.resume')).ok, false)
 })
 
+test('Autopilot pins workspace-write without prompts only on Board-spawned execution sessions', async (t) => {
+  const autopilotBoard = await openBoard(t, {
+    allowCreate: true,
+    ticketText: '---\nid: KAN-101\ntitle: Fix login\ncolumn: ready\nbase: head\n---\nFix login.\n',
+  })
+  await autopilotBoard.call('board.settings.update', { wipLimit: 3, autopilot: true })
+  const started = await autopilotBoard.call('ticket.move', { column: 'in-progress' })
+  assert.equal(started.ok, true, started.error)
+  assert.deepEqual(autopilotBoard.created[0].agent.policyEvents, [
+    { type: 'sandbox/mode', data: { mode: 'workspace-write' } },
+    { type: 'approval/policy', data: { policy: 'never' } },
+  ])
+  assert.deepEqual(autopilotBoard.agent.policyEvents, [], 'unowned sessions keep their ambient policy')
+
+  const ambientBoard = await openBoard(t, {
+    allowCreate: true,
+    ticketText: '---\nid: KAN-101\ntitle: Fix login\ncolumn: ready\nbase: head\n---\nFix login.\n',
+  })
+  const ambientStarted = await ambientBoard.call('ticket.move', { column: 'in-progress' })
+  assert.equal(ambientStarted.ok, true, ambientStarted.error)
+  assert.deepEqual(ambientBoard.created[0].agent.policyEvents, [])
+})
+
 test('Retry fresh disposes the stalled session and starts a new one in the same Worktree and branch', async (t) => {
   const board = await openBoard(t, { allowCreate: true, ticketText: '---\nid: KAN-101\ntitle: Fix login\ncolumn: ready\nbase: head\n---\nFix login.\n' })
+  await board.call('board.settings.update', { wipLimit: 3, autopilot: true })
   assert.equal((await board.call('ticket.move', { column: 'in-progress' })).ok, true)
   const original = (await board.call('board.list')).tickets[0]
   const old = board.created[0].agent
@@ -198,6 +247,10 @@ test('Retry fresh disposes the stalled session and starts a new one in the same 
   assert.equal(reply.ok, true, reply.error)
   assert.deepEqual(board.disposed, [old.id])
   assert.equal(board.created.length, 2)
+  assert.deepEqual(board.created[1].agent.policyEvents, [
+    { type: 'sandbox/mode', data: { mode: 'workspace-write' } },
+    { type: 'approval/policy', data: { policy: 'never' } },
+  ])
   const card = (await board.call('board.list')).tickets[0]
   assert.notEqual(card.sessionId, old.id)
   assert.equal(card.worktreePath, original.worktreePath)
