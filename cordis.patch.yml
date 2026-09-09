@@ -1,0 +1,6 @@
+# Bundle patch for dsh-kanban. The web profile loads this Host row at startup.
+# The dsh.client manifest in package.json registers the browser half.
+
+- insert:
+    - id: kanban
+      name: 'dsh-kanban'
