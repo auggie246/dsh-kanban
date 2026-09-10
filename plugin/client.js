@@ -44,22 +44,39 @@ return {
     // the Board closes.
     const boardOpener = { current: null }
 
+    // Focus restoration helpers (issue #16). A surface remembers the
+    // element that opened it and hands focus back when it closes.
+    const rememberOpener = (opener) => {
+      if (typeof document !== 'undefined' && document.activeElement) {
+        opener.current = document.activeElement
+      }
+    }
+    const restoreOpener = (opener) => {
+      const element = opener.current
+      opener.current = null
+      if (element !== null && typeof element.focus === 'function') element.focus()
+    }
+
     // Escape dismissal registry (issue #16). Every open surface — the
     // Board overlay, a dialog, a nested discard confirmation — registers
-    // a handler box; the document-level capture listener registered at the
+    // a handler ref; the document-level capture listener registered at the
     // end of apply hands Escape to the topmost surface only and stops
     // propagation, so dismissal works wherever focus sits and a dialog
-    // press never also closes the Board. A box (not the handler itself)
-    // goes on the stack so the handler stays fresh across renders.
+    // press never also closes the Board. A ref (not the handler itself)
+    // goes on the stack so the handler stays fresh across renders. The
+    // element-level Escape handlers on dialogs and the Board root remain
+    // as a fallback for environments where the document listener is inert
+    // (for example the shared test vm); in a real browser the capture
+    // listener wins first.
     const escapeStack = []
     const useEscapeDismissal = (active, onEscape) => {
-      const box = React.useState({ current: onEscape })[0]
-      box.current = onEscape
+      const handlerRef = React.useState({ current: onEscape })[0]
+      handlerRef.current = onEscape
       React.useEffect(() => {
         if (!active) return undefined
-        if (!escapeStack.includes(box)) escapeStack.push(box)
+        if (!escapeStack.includes(handlerRef)) escapeStack.push(handlerRef)
         return () => {
-          const index = escapeStack.indexOf(box)
+          const index = escapeStack.indexOf(handlerRef)
           if (index >= 0) escapeStack.splice(index, 1)
         }
       }, [active])
@@ -167,9 +184,7 @@ return {
           onClick: () => {
             // Remember who opened the Board so closing it can hand focus
             // back (issue #16). In a real browser this is the button.
-            if (typeof document !== 'undefined' && document.activeElement) {
-              boardOpener.current = document.activeElement
-            }
+            rememberOpener(boardOpener)
             setOpen(true)
           },
           // The icon is decorative; the accessible name comes from the
@@ -864,15 +879,11 @@ return {
       // opens — the opener — and hand focus back when it closes.
       const dialogOpener = React.useState({ current: null })[0]
       const openDialog = (next) => {
-        if (typeof document !== 'undefined' && document.activeElement) {
-          dialogOpener.current = document.activeElement
-        }
+        rememberOpener(dialogOpener)
         setDialog(next)
       }
       const closeDialog = () => {
-        const opener = dialogOpener.current
-        dialogOpener.current = null
-        if (opener !== null && typeof opener.focus === 'function') opener.focus()
+        restoreOpener(dialogOpener)
         setDialog(null)
       }
 
@@ -1159,9 +1170,7 @@ return {
       // Closing the Board hands focus back to the element that opened it —
       // normally the sidebar Kanban button (issue #16).
       const closeOverlay = () => {
-        const opener = boardOpener.current
-        boardOpener.current = null
-        if (opener !== null && typeof opener.focus === 'function') opener.focus()
+        restoreOpener(boardOpener)
         setOpen(false)
       }
       if (!open) return null
