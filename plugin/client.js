@@ -827,10 +827,10 @@ return {
           { className: 'kanban-state' },
           'No active Workspace. Select a Workspace to see its Board.',
         )
-      } else if (result === null) {
-        body = h('div', { className: 'kanban-state' }, 'Reading Ticket Files…')
       } else if (error !== null) {
         body = h('div', { className: 'kanban-state kanban-state-error' }, 'Board unavailable: ' + error)
+      } else if (result === null) {
+        body = h('div', { className: 'kanban-state' }, 'Reading Ticket Files…')
       } else {
         body = h(
           'div',
