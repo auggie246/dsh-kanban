@@ -254,30 +254,34 @@ test('Escape closes the Board overlay without clicking into it, and again after 
   assert.equal(env.render(session.overlayElement), null)
 })
 
+// The five dialog openers, shared by the dismissal and focus-trap tests.
+// Each opens one dialog kind against an environment whose remote answers
+// the dialog's own reads.
+const DIALOG_KINDS = [
+  {
+    name: 'Ticket create dialog',
+    open: (tree, e) => e.byClass(tree, 'kanban-new-btn')[0].props.onClick({ stopPropagation() {} }),
+  },
+  {
+    name: 'Ticket edit dialog',
+    open: (tree, e) => e.byClass(tree, 'kanban-card')[0].props.onClick({ stopPropagation() {} }),
+  },
+  {
+    name: 'Import dialog',
+    open: (tree, e) => e.byClass(tree, 'kanban-import-btn')[0].props.onClick({ stopPropagation() {} }),
+  },
+  {
+    name: 'Bounce dialog',
+    open: (tree, e) => e.byClass(tree, 'kanban-card-reject')[0].props.onClick({ stopPropagation() {} }),
+  },
+  {
+    name: 'Recovery dialog',
+    open: (tree, e) => e.byText(tree, 'Send back to Ready')[0].props.onClick({ stopPropagation() {} }),
+  },
+]
+
 test('Escape closes the topmost dialog first, then the Board overlay', async () => {
-  const kinds = [
-    {
-      name: 'Ticket create dialog',
-      open: (tree, e) => e.byClass(tree, 'kanban-new-btn')[0].props.onClick({ stopPropagation() {} }),
-    },
-    {
-      name: 'Ticket edit dialog',
-      open: (tree, e) => e.byClass(tree, 'kanban-card')[0].props.onClick({ stopPropagation() {} }),
-    },
-    {
-      name: 'Import dialog',
-      open: (tree, e) => e.byClass(tree, 'kanban-import-btn')[0].props.onClick({ stopPropagation() {} }),
-    },
-    {
-      name: 'Bounce dialog',
-      open: (tree, e) => e.byClass(tree, 'kanban-card-reject')[0].props.onClick({ stopPropagation() {} }),
-    },
-    {
-      name: 'Recovery dialog',
-      open: (tree, e) => e.byText(tree, 'Send back to Ready')[0].props.onClick({ stopPropagation() {} }),
-    },
-  ]
-  for (const kind of kinds) {
+  for (const kind of DIALOG_KINDS) {
     const env = createEnv((method) => {
       if (method === 'issue.import.list') return { ok: true, value: { ok: true, platform: 'github', issues: [{ number: 7, title: 'Issue', url: 'u7', imported: false }] } }
       return defaultRemote(method)
@@ -401,4 +405,140 @@ test('Escape cannot dismiss the Import dialog while an import is pending', async
   assert.equal(env.pressEscape(), true)
   tree = session.pass()
   assert.equal(env.byClass(tree, 'kanban-dialog-backdrop').length, 1, 'pending import blocks dismissal')
+})
+
+test('Escape cannot dismiss the Bounce dialog while a bounce is pending', async () => {
+  const env = createEnv((method) => {
+    if (method === 'ticket.bounce') return { pending: true }
+    return defaultRemote(method)
+  })
+  const session = await openBoardOverlay(env, defaultRemote)
+  env.byClass(session.tree, 'kanban-card-reject')[0].props.onClick({ stopPropagation() {} })
+  let tree = session.pass()
+  const comment = env.findAll(tree, (el) => el.type === 'textarea')[0]
+  comment.props.onChange({ target: { value: 'Please address the failing check.' } })
+  tree = session.pass()
+  env.byClass(tree, 'kanban-btn-primary')[0].props.onClick()
+  tree = session.pass()
+  assert.equal(env.byClass(tree, 'kanban-btn-primary')[0].children[0], 'Sending…')
+  assert.equal(env.pressEscape(), true)
+  tree = session.pass()
+  assert.equal(env.byClass(tree, 'kanban-dialog-backdrop').length, 1, 'pending bounce blocks dismissal')
+})
+
+test('Escape cannot dismiss the Recovery dialog while an action is pending', async () => {
+  const env = createEnv((method) => {
+    if (method === 'ticket.sendBack') return { pending: true }
+    return defaultRemote(method)
+  })
+  const session = await openBoardOverlay(env, defaultRemote)
+  env.byText(session.tree, 'Send back to Ready')[0].props.onClick({ stopPropagation() {} })
+  let tree = session.pass()
+  env.byClass(tree, 'kanban-btn-primary')[0].props.onClick()
+  tree = session.pass()
+  assert.equal(env.byClass(tree, 'kanban-btn-primary')[0].children[0], 'Working…')
+  assert.equal(env.pressEscape(), true)
+  tree = session.pass()
+  assert.equal(env.byClass(tree, 'kanban-dialog-backdrop').length, 1, 'pending recovery blocks dismissal')
+})
+
+// Dialog focus trap: "Dialogs contain keyboard focus" (issue #16). Tab and
+// Shift+Tab wrap inside the dialog under focus instead of leaking into the
+// Board behind the modal backdrop. The fake container stands in for the
+// backdrop element the real DOM passes as event.currentTarget.
+const trapContainer = (labels) => {
+  const focusables = labels.map((label) => ({ label, focusCalls: 0, focus() { this.focusCalls += 1 } }))
+  return {
+    focusables,
+    querySelectorAll: () => focusables,
+    contains: (el) => focusables.includes(el),
+  }
+}
+const tabEvent = (container, shiftKey) => ({
+  key: 'Tab',
+  shiftKey,
+  currentTarget: container,
+  preventDefaultCalls: 0,
+  stopped: false,
+  preventDefault() { this.preventDefaultCalls += 1 },
+  stopPropagation() { this.stopped = true },
+})
+
+test('Tab wraps inside each open dialog and never leaves it', async () => {
+  for (const kind of DIALOG_KINDS) {
+    const env = createEnv((method) => {
+      if (method === 'issue.import.list') return { ok: true, value: { ok: true, platform: 'github', issues: [{ number: 7, title: 'Issue', url: 'u7', imported: false }] } }
+      return defaultRemote(method)
+    })
+    const session = await openBoardOverlay(env)
+    kind.open(session.tree, env)
+    const tree = session.pass()
+    const backdrop = env.byClass(tree, 'kanban-dialog-backdrop')[0]
+    assert.notEqual(backdrop.props.onKeyDown, undefined, kind.name + ' mounts a keydown handler')
+    const container = trapContainer(['first', 'second', 'last'])
+    const event = tabEvent(container, false)
+    env.document.activeElement = container.focusables[2]
+    backdrop.props.onKeyDown(event)
+    assert.equal(event.preventDefaultCalls, 1, kind.name + ' wraps Tab at the last control')
+    assert.equal(container.focusables[0].focusCalls, 1, kind.name + ' moves focus to the first control')
+    assert.equal(event.stopped, true, kind.name + ' keeps the press away from lower surfaces')
+  }
+})
+
+test('Tab leaves mid-form focus alone and Shift+Tab wraps backward', async () => {
+  const env = createEnv(defaultRemote)
+  const session = await openBoardOverlay(env, defaultRemote)
+  env.byClass(session.tree, 'kanban-new-btn')[0].props.onClick()
+  const tree = session.pass()
+  const backdrop = env.byClass(tree, 'kanban-dialog-backdrop')[0]
+  const container = trapContainer(['first', 'second', 'last'])
+
+  env.document.activeElement = container.focusables[1]
+  const forward = tabEvent(container, false)
+  backdrop.props.onKeyDown(forward)
+  assert.equal(forward.preventDefaultCalls, 0, 'mid-form Tab keeps the default cycle')
+  assert.equal(container.focusables[0].focusCalls + container.focusables[2].focusCalls, 0)
+
+  env.document.activeElement = container.focusables[0]
+  const backward = tabEvent(container, true)
+  backdrop.props.onKeyDown(backward)
+  assert.equal(backward.preventDefaultCalls, 1, 'Shift+Tab wraps at the first control')
+  assert.equal(container.focusables[2].focusCalls, 1, 'Shift+Tab moves focus to the last control')
+})
+
+test('Tab pulls focus back inside when it sits outside the open dialog', async () => {
+  const env = createEnv(defaultRemote)
+  const session = await openBoardOverlay(env, defaultRemote)
+  env.byClass(session.tree, 'kanban-new-btn')[0].props.onClick()
+  const tree = session.pass()
+  const backdrop = env.byClass(tree, 'kanban-dialog-backdrop')[0]
+  const container = trapContainer(['first', 'last'])
+  const event = tabEvent(container, false)
+  env.document.activeElement = null
+  backdrop.props.onKeyDown(event)
+  assert.equal(event.preventDefaultCalls, 1, 'stray focus is captured back into the dialog')
+  assert.equal(container.focusables[0].focusCalls, 1)
+})
+
+test('the discard confirmation traps Tab within its own controls', async () => {
+  const env = createEnv(defaultRemote)
+  const session = await openBoardOverlay(env, defaultRemote)
+  env.byClass(session.tree, 'kanban-card')[0].props.onClick()
+  let tree = session.pass()
+  const titleInput = env.findAll(tree, (el) => el.type === 'input' && el.props.value === 'Typed ticket')[0]
+  titleInput.props.onChange({ target: { value: 'Rewritten title' } })
+  tree = session.pass()
+  assert.equal(env.pressEscape(), true)
+  tree = session.pass()
+  const backdrops = env.byClass(tree, 'kanban-dialog-backdrop')
+  assert.equal(backdrops.length, 2, 'confirmation sits inside the Ticket dialog backdrop')
+  const confirmBackdrop = backdrops[1]
+  const container = trapContainer(['Keep editing', 'Discard edits'])
+  const event = tabEvent(container, false)
+  env.document.activeElement = container.focusables[1]
+  confirmBackdrop.props.onKeyDown(event)
+  assert.equal(event.preventDefaultCalls, 1, 'confirmation wraps Tab within itself')
+  assert.equal(container.focusables[0].focusCalls, 1)
+  assert.equal(event.stopped, true, 'the Ticket dialog backdrop never sees the press')
+  assert.notEqual(backdrops[0].props.onKeyDown, undefined, 'the outer Ticket dialog still traps its own cycle')
 })
