@@ -934,13 +934,21 @@ return {
                 if (event.key === 'Escape') props.onClose()
               },
         },
+        // Header hierarchy (issue #18): clean product title, Workspace title
+        // with a truncating path, Autopilot state, then the Ticket actions —
+        // Import Issues stays secondary, + New Ticket is the primary action.
         h(
           'header',
           { className: 'kanban-board-header' },
-          h('span', { className: 'kanban-board-name' }, '▦ Kanban'),
+          h('span', { className: 'kanban-board-name' }, 'Kanban'),
           workspace === undefined
             ? null
-            : h('span', { className: 'kanban-board-workspace' }, workspace.title + ' — ' + workspace.path),
+            : h(
+                'span',
+                { className: 'kanban-board-workspace' },
+                h('span', { className: 'kanban-board-workspace-title' }, workspace.title),
+                h('span', { className: 'kanban-board-workspace-path' }, workspace.path),
+              ),
           autopilot
             ? h('span', {
                 className: 'kanban-autopilot-indicator',
@@ -949,21 +957,21 @@ return {
             : null,
           workspaceId === undefined
             ? null
-            : h(React.Fragment, null,
+            : h('div', { className: 'kanban-board-actions' },
                 h(
                   'button',
                   {
-                    className: 'kanban-import-btn',
+                    className: 'kanban-import-btn kanban-board-action-secondary',
                     type: 'button',
                     onClick: () => setDialog({ mode: 'import' }),
-                    title: 'Import open Issues into the Backlog',
+                    title: 'Import open remote Issues into the Backlog',
                   },
-                  'Import issues',
+                  'Import Issues',
                 ),
                 h(
                   'button',
                   {
-                    className: 'kanban-new-btn',
+                    className: 'kanban-new-btn kanban-board-action-primary',
                     type: 'button',
                     onClick: () => setDialog({ mode: 'create' }),
                     title: 'Create a Ticket in the Backlog',
@@ -1226,54 +1234,83 @@ return {
       // horizontal row — degradation is visual only.
       '.hHd-Xa_footerActions{flex-direction:column;align-items:stretch;gap:6px;}',
       '.hHd-Xa_collapsed .hHd-Xa_footerActions{align-items:center;}',
+      // Board surface (issue #18): base layer for the page, bg-layer-1
+      // columns, bg-layer-2 cards, hairline borders only. Radii: 10px
+      // columns, 8px cards and header buttons. 12px layout gap rhythm.
       '.kanban-board-overlay{position:fixed;inset:0;z-index:90;display:flex;pointer-events:auto;}',
       '.kanban-board-embedded{height:100%;min-height:0;display:flex;}',
       '.kanban-board{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;',
       'background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);outline:none;}',
-      '.kanban-board-header{display:flex;align-items:center;gap:12px;padding:12px 20px;',
+      // The header wraps instead of clipping: the Workspace path collapses
+      // first (min-width:0 + ellipsis), then the actions group wraps as one
+      // unit to a second row on narrow windows.
+      '.kanban-board-header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:12px 20px;',
       'border-bottom:1px solid var(--dsw-alias-border-l1);}',
-      '.kanban-board-name{font-size:15px;font-weight:600;}',
-      '.kanban-board-workspace{flex:1;font-size:12px;color:var(--dsw-alias-label-secondary);',
+      '.kanban-board-name{flex:none;font-size:15px;font-weight:600;letter-spacing:-.01em;}',
+      '.kanban-board-workspace{display:flex;align-items:baseline;gap:8px;flex:1 1 160px;min-width:0;overflow:hidden;}',
+      '.kanban-board-workspace-title{flex:none;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-board-workspace-path{font-size:12px;color:var(--dsw-alias-label-tertiary);',
       'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-      '.kanban-autopilot-indicator{flex:none;padding:2px 8px;font-size:11px;font-weight:600;',
-      'color:var(--dsw-alias-state-success-primary);border:1px solid var(--dsw-alias-state-success-primary);border-radius:10px;}',
-      '.kanban-close,.kanban-new-btn,.kanban-import-btn{padding:4px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;',
-      'background:transparent;color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer;}',
-      '.kanban-close:hover,.kanban-new-btn:hover,.kanban-import-btn:hover{background:var(--dsw-alias-bg-layer-1);}',
-      '.kanban-new-btn{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);}',
+      '.kanban-board-actions{flex:none;display:flex;align-items:center;gap:8px;}',
+      '.kanban-autopilot-indicator{flex:none;padding:2px 10px;font-size:11px;font-weight:600;',
+      'color:var(--dsw-alias-state-success-primary);border:1px solid var(--dsw-alias-state-success-primary);border-radius:999px;}',
+      // Primary header action: filled brand, with the DSH primary-button
+      // token pairing (fill plus label-primary-foreground).
+      '.kanban-new-btn.kanban-board-action-primary{flex:none;padding:5px 14px;border:1px solid transparent;border-radius:8px;',
+      'background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);',
+      'font-size:12px;font-weight:600;cursor:pointer;}',
+      '.kanban-new-btn.kanban-board-action-primary:hover{background:var(--dsw-alias-button-primary-hover);}',
+      // Secondary header action: quiet ghost for importing existing remote
+      // Issues; there is no export action by design.
+      '.kanban-import-btn.kanban-board-action-secondary{flex:none;padding:5px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;',
+      'background:transparent;color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;cursor:pointer;}',
+      '.kanban-import-btn.kanban-board-action-secondary:hover{background:var(--dsw-alias-interactive-bg-hover);}',
+      // Close keeps its ghost shape; only the radius and hover wash track
+      // the header rhythm. Its behavior belongs to separate Board work.
+      '.kanban-close{flex:none;padding:5px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;',
+      'background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;cursor:pointer;}',
+      '.kanban-close:hover{background:var(--dsw-alias-interactive-bg-hover);}',
+      '.kanban-new-btn:focus-visible,.kanban-import-btn:focus-visible,.kanban-close:focus-visible{',
+      'outline:2px solid var(--dsw-alias-border-l4);outline-offset:2px;}',
+      // Columns scroll horizontally as one row; each column scrolls its own
+      // cards vertically. The 220px floor keeps five columns usable on
+      // narrow windows instead of squeezing them.
       '.kanban-columns{flex:1;display:flex;gap:12px;padding:16px 20px;overflow-x:auto;}',
       '.kanban-column{flex:1 1 0;min-width:220px;display:flex;flex-direction:column;',
-      'background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:8px;}',
+      'background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:10px;}',
       '.kanban-column-dragover{border-color:var(--dsw-alias-brand-primary);}',
-      '.kanban-column-head{display:flex;align-items:center;justify-content:space-between;',
-      'padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);}',
-      '.kanban-column-label{font-size:12px;font-weight:600;text-transform:uppercase;',
-      'letter-spacing:.04em;color:var(--dsw-alias-label-secondary);}',
-      '.kanban-column-count{font-size:11px;color:var(--dsw-alias-label-secondary);',
-      'background:var(--dsw-alias-bg-layer-2);border-radius:10px;padding:1px 8px;}',
-      '.kanban-column-cards{flex:1;display:flex;flex-direction:column;gap:8px;padding:10px;overflow-y:auto;}',
+      '.kanban-column-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 12px 8px;}',
+      '.kanban-column-label{font-size:11px;font-weight:600;text-transform:uppercase;',
+      'letter-spacing:.06em;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-column-count{font-size:11px;font-weight:500;color:var(--dsw-alias-label-tertiary);',
+      'font-variant-numeric:tabular-nums;white-space:nowrap;}',
+      '.kanban-column-cards{flex:1;display:flex;flex-direction:column;gap:10px;padding:2px 10px 12px;overflow-y:auto;}',
       '.kanban-card{background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);',
-      'border-radius:6px;padding:10px;cursor:grab;}',
+      'border-radius:8px;padding:10px 12px;cursor:grab;}',
       '.kanban-card-head{margin-bottom:4px;}',
-      '.kanban-card-id{font-size:11px;font-weight:600;color:var(--dsw-alias-brand-primary);}',
-      '.kanban-card-title{font-size:13px;font-weight:500;margin-bottom:4px;}',
-      '.kanban-card-preview{font-size:12px;color:var(--dsw-alias-label-secondary);}',
-      '.kanban-card-issue-link{display:inline-block;margin-top:7px;margin-right:10px;font-size:11px;font-weight:600;',
+      '.kanban-card-id{font-size:11px;font-weight:600;color:var(--dsw-alias-label-tertiary);}',
+      '.kanban-card-title{font-size:13px;font-weight:500;margin-bottom:4px;line-height:1.4;}',
+      '.kanban-card-preview{font-size:12px;line-height:1.45;color:var(--dsw-alias-label-secondary);}',
+      '.kanban-card-issue-link,.kanban-card-review-link{display:inline-block;margin-top:7px;margin-right:10px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-brand-primary);text-decoration:none;}',
-      '.kanban-card-issue-link:hover{text-decoration:underline;}',
+      '.kanban-card-issue-link:hover,.kanban-card-review-link:hover{text-decoration:underline;}',
       '.kanban-card-session{display:inline-block;margin-top:7px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-brand-primary);text-decoration:none;}',
       '.kanban-card-session:hover{text-decoration:underline;}',
+      '.kanban-card a:focus-visible,.kanban-card summary:focus-visible{',
+      'outline:2px solid var(--dsw-alias-border-l4);outline-offset:2px;border-radius:2px;}',
       '.kanban-card-reject{display:block;margin-top:8px;}',
       '.kanban-local-review{margin-top:8px;padding-top:8px;border-top:1px solid var(--dsw-alias-border-l1);}',
       '.kanban-local-review-title{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);}',
       '.kanban-local-diff{max-height:240px;margin:6px 0;padding:8px;overflow:auto;white-space:pre;',
-      'font-size:10px;line-height:1.4;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:4px;}',
-      '.kanban-card-blocked{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
+      'font-size:10px;line-height:1.4;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:6px;}',
+      // Blocked reason: card-level badge with the error token, never a
+      // column; native blockers and Sync errors share the language.
+      '.kanban-card-blocked{display:block;max-width:100%;margin-top:6px;padding:2px 8px;font-size:11px;font-weight:500;',
       'color:var(--dsw-alias-state-error-primary);border:1px solid var(--dsw-alias-state-error-primary);',
-      'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-      '.kanban-card-issue-blockers,.kanban-card-sync-error{margin-top:6px;padding:6px;font-size:11px;',
-      'color:var(--dsw-alias-state-error-primary);border:1px solid var(--dsw-alias-state-error-primary);border-radius:4px;}',
+      'border-radius:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.kanban-card-issue-blockers,.kanban-card-sync-error{margin-top:6px;padding:6px 8px;font-size:11px;',
+      'color:var(--dsw-alias-state-error-primary);border:1px solid var(--dsw-alias-state-error-primary);border-radius:6px;}',
       '.kanban-card-issue-blockers-title{font-weight:600;margin-bottom:3px;}',
       '.kanban-card-issue-blockers a{display:block;color:inherit;}',
       '.kanban-card-issue-comments{margin-top:7px;font-size:11px;color:var(--dsw-alias-label-secondary);}',
@@ -1282,28 +1319,38 @@ return {
       '.kanban-card-issue-comment-author{font-weight:600;}',
       '.kanban-card-issue-comment-body{white-space:pre-wrap;overflow-wrap:anywhere;}',
       '.kanban-card-issue-comment a{color:var(--dsw-alias-brand-primary);}',
-      '.kanban-card-queued{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
-      'color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l1);',
-      'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.kanban-card-queued{display:block;max-width:100%;margin-top:6px;padding:2px 8px;font-size:11px;font-weight:500;',
+      'color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l2);',
+      'border-radius:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
       '.kanban-card-dequeue{display:inline-block;margin-top:7px;font-size:11px;font-weight:600;',
       'color:var(--dsw-alias-label-secondary);text-decoration:none;}',
       '.kanban-card-dequeue:hover{text-decoration:underline;}',
       // Attention Badge on a card: the session awaits approval, errored, or
-      // finished (issue #6). One state color per badge kind.
-      '.kanban-card-attention{display:block;max-width:100%;margin-top:6px;padding:1px 6px;font-size:11px;font-weight:600;',
-      'border-radius:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid transparent;}',
+      // finished (issue #6). One state color per badge kind; weight 500
+      // keeps the badge quiet next to the 13px/500 card title.
+      '.kanban-card-attention{display:block;max-width:100%;margin-top:6px;padding:2px 8px;font-size:11px;font-weight:500;',
+      'border-radius:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid transparent;}',
       '.kanban-attention-approval{color:var(--dsw-alias-state-warn-primary);border-color:var(--dsw-alias-state-warn-primary);}',
       '.kanban-attention-error{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary);}',
       '.kanban-attention-finished{color:var(--dsw-alias-state-success-primary);border-color:var(--dsw-alias-state-success-primary);}',
+      // State screens share the Board language: centered, secondary label
+      // color, the error token reserved for Board failures.
       '.kanban-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;',
-      'gap:8px;padding:40px;text-align:center;}',
-      '.kanban-state-title{font-size:15px;font-weight:600;}',
-      '.kanban-state-hint{max-width:420px;font-size:13px;color:var(--dsw-alias-label-secondary);}',
+      'gap:8px;padding:40px 24px;text-align:center;color:var(--dsw-alias-label-secondary);font-size:13px;}',
+      '.kanban-state-title{font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary);}',
+      '.kanban-state-hint{max-width:420px;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-secondary);}',
       '.kanban-state-error{color:var(--dsw-alias-state-error-primary);',
       'font-size:13px;white-space:pre-wrap;}',
       '.kanban-move-error{position:absolute;right:20px;bottom:16px;padding:6px 12px;font-size:12px;',
       'color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-bg-layer-1);',
-      'border:1px solid var(--dsw-alias-state-error-primary);border-radius:6px;}',
+      'border:1px solid var(--dsw-alias-state-error-primary);border-radius:8px;}',
+      // Narrow windows: tighter header and column rhythm; the header wrap
+      // and the 220px column floor already prevent overlap and clipping.
+      '@media (max-width: 640px){',
+      '.kanban-board-header{gap:8px;padding:10px 12px;}',
+      '.kanban-columns{gap:10px;padding:12px;}',
+      '.kanban-board-name{font-size:14px;}',
+      '}',
       '.kanban-dialog-backdrop{position:fixed;inset:0;z-index:100;display:flex;align-items:center;',
       'justify-content:center;background:rgba(0,0,0,.4);pointer-events:auto;}',
       '.kanban-dialog{width:560px;max-width:90vw;max-height:80vh;display:flex;flex-direction:column;gap:12px;',
