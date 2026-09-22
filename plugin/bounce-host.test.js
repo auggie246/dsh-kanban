@@ -610,3 +610,44 @@ test('Bounce validation and delivery failures leave the Ticket File unchanged', 
     })
   }
 })
+
+// The sidebar watch polls every few seconds. A Workspace that is not a Git
+// repository must produce one terminal line, not one per poll, and the Board
+// itself must carry the state (issue #19).
+test('a non-Git Workspace is logged once and reported on the Board', async (t) => {
+  const logged = []
+  const originalError = console.error
+  console.error = (...args) => logged.push(args.join(' '))
+  t.after(() => { console.error = originalError })
+  const fatal = 'fatal: not a git repository (or any parent up to mount point /)'
+  const board = await openBoard(t, {
+    runGit: async () => ({ exitCode: 128, stdout: { text: '' }, stderr: { text: fatal } }),
+  })
+
+  const listed = await board.call('board.list')
+  assert.equal(listed.repository, false)
+  assert.deepEqual(logged, [], 'reading the Board does not log')
+
+  const watched = await board.call('board.watch.list')
+  assert.equal(watched.ok, true)
+  await board.call('board.watch.list')
+  await board.call('board.watch.list')
+
+  assert.equal(logged.length, 1, 'three polls log one line')
+  assert.match(logged[0], /is not a Git repository/)
+  assert.match(logged[0], /Ticket execution and remote PR\/MR completion are off/)
+  assert.doesNotMatch(logged[0], /fatal/, 'the raw git fatal line is not repeated')
+})
+
+test('a Git Workspace reports repository true and logs nothing', async (t) => {
+  const logged = []
+  const originalError = console.error
+  console.error = (...args) => logged.push(args.join(' '))
+  t.after(() => { console.error = originalError })
+  const board = await openBoard(t)
+
+  const listed = await board.call('board.list')
+  assert.equal(listed.repository, true)
+  await board.call('board.watch.list')
+  assert.deepEqual(logged, [])
+})

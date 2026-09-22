@@ -27,15 +27,17 @@ function fakeGit(remotes) {
 test('remote detection distinguishes GitHub, GitLab, and no supported remote', async () => {
   assert.deepEqual(await kanbanDetectRemote(fakeGit({ origin: 'git@github.com:owner/repo.git' })), {
     platform: 'github', remote: 'origin', url: 'git@github.com:owner/repo.git', repo: 'github.com/owner/repo',
+    repository: true,
   })
   assert.deepEqual(await kanbanDetectRemote(fakeGit({ upstream: 'https://gitlab.com/group/repo.git' })), {
     platform: 'gitlab', remote: 'upstream', url: 'https://gitlab.com/group/repo.git', repo: 'gitlab.com/group/repo',
+    repository: true,
   })
   assert.deepEqual(await kanbanDetectRemote(fakeGit({ origin: 'ssh://code.example.test/repo.git' })), {
-    platform: 'none', remote: '', url: '', repo: '',
+    platform: 'none', remote: '', url: '', repo: '', repository: true,
   })
   assert.deepEqual(await kanbanDetectRemote(fakeGit({ local: '/srv/github.com/repo.git' })), {
-    platform: 'none', remote: '', url: '', repo: '',
+    platform: 'none', remote: '', url: '', repo: '', repository: true,
   })
   assert.equal((await kanbanDetectRemote(fakeGit({ origin: 'ssh://git@github.company.test/team/repo.git' }))).platform, 'github')
   assert.equal((await kanbanDetectRemote(fakeGit({ origin: 'git@gitlab.company.test:team/repo.git' }))).platform, 'gitlab')
@@ -45,8 +47,20 @@ test('remote detection distinguishes GitHub, GitLab, and no supported remote', a
   )
   assert.deepEqual(enterprise, {
     platform: 'github', remote: 'origin', url: 'ssh://git@code.company.test/team/repo.git', repo: 'code.company.test/team/repo',
+    repository: true,
   })
-  assert.deepEqual(await kanbanDetectRemote(fakeGit({})), { platform: 'none', remote: '', url: '', repo: '' })
+  assert.deepEqual(await kanbanDetectRemote(fakeGit({})), {
+    platform: 'none', remote: '', url: '', repo: '', repository: true,
+  })
+})
+
+test('a Workspace outside a Git repository is an ordinary no-remote state', async () => {
+  const result = await kanbanDetectRemote(async (args, allowed) => {
+    assert.deepEqual(args, ['remote'])
+    assert.deepEqual(allowed, [0, 128])
+    return { text: '', exitCode: 128, stderr: 'fatal: not a git repository' }
+  })
+  assert.deepEqual(result, { platform: 'none', remote: '', url: '', repo: '', repository: false })
 })
 
 test('enterprise probing reaches GitLab when gh is not installed', async () => {

@@ -20,6 +20,10 @@ repository. Per-Workspace Board configuration persists separately in DSH.
 The Board is the orchestration surface: it starts, watches, and review-gates
 Agent Sessions.
 
+A Board whose Workspace is not a Git repository still reads and shows Ticket
+Files. It shows a notice on its face: Ticket execution and remote PR/MR
+completion need Git. The notice never blocks reading the Board.
+
 ### Ticket
 
 One unit of work on the Board, shown as a card. A Ticket has a title, a

@@ -14,8 +14,17 @@ function kanbanRemoteLocation(remoteUrl) {
 
 // Detect the supported remote used for completion. `origin` wins when several
 // supported remotes exist, because Ticket branches are normally pushed there.
+// Outside a Git repository `git remote` fails with exit code 128. That is an
+// ordinary Workspace state, not a failure: `repository` reports it so callers
+// can show it once instead of logging the same fatal line on every poll.
+function kanbanNoRemote(repository) {
+  return { platform: 'none', remote: '', url: '', repo: '', repository }
+}
+
 async function kanbanDetectRemote(git, probe) {
-  const names = String((await git(['remote'])).text || '').split(/\r?\n/)
+  const listed = await git(['remote'], [0, 128])
+  if (listed.exitCode !== 0) return kanbanNoRemote(false)
+  const names = String(listed.text || '').split(/\r?\n/)
     .map((name) => name.trim()).filter((name) => name !== '')
   const ordered = names.includes('origin') ? ['origin', ...names.filter((name) => name !== 'origin')] : names
   for (const remote of ordered) {
@@ -24,14 +33,14 @@ async function kanbanDetectRemote(git, probe) {
     if (result.exitCode !== 0) continue
     const url = String(result.text || '').trim()
     const location = kanbanRemoteLocation(url)
-    if (/(^|\.)github(?:\.|$)/.test(location.host)) return { platform: 'github', remote, url, repo: location.repo }
-    if (/(^|\.)gitlab(?:\.|$)/.test(location.host)) return { platform: 'gitlab', remote, url, repo: location.repo }
+    if (/(^|\.)github(?:\.|$)/.test(location.host)) return { platform: 'github', remote, url, repo: location.repo, repository: true }
+    if (/(^|\.)gitlab(?:\.|$)/.test(location.host)) return { platform: 'gitlab', remote, url, repo: location.repo, repository: true }
     if (probe !== undefined && location.host !== '') {
       const platform = await probe(location)
-      if (platform === 'github' || platform === 'gitlab') return { platform, remote, url, repo: location.repo }
+      if (platform === 'github' || platform === 'gitlab') return { platform, remote, url, repo: location.repo, repository: true }
     }
   }
-  return { platform: 'none', remote: '', url: '', repo: '' }
+  return kanbanNoRemote(true)
 }
 
 async function kanbanProbeRemotePlatform(location, command) {

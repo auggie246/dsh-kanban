@@ -564,6 +564,10 @@ return {
       void forwardWatchSignal({ signal: 'agent-error', sessionId })
     })
 
+    // One Git boundary for a Workspace, shared by Board reads and completion.
+    const completionGit = (workspace) => (args, allowed = [0]) =>
+      kanbanRunHostGit(shell, workspace.path, args, { allowedExitCodes: allowed })
+
     // board.list({ workspaceId }) → card data for every Ticket File in the
     // Workspace. Ticket Files stay read-only. A missing directory is an
     // empty Board, not an error; a single unreadable file is logged and
@@ -575,6 +579,10 @@ return {
         if (workspaceLookup.workspace === undefined) return { ok: false, error: workspaceLookup.error }
         try {
           const boardSettings = await enqueueSettings(() => ensureWorkspaceSettings(workspaceLookup.workspace))
+          // A Workspace outside a Git repository cannot run Ticket execution
+          // or remote completion. The Board states that on its face instead of
+          // failing later, so `repository` travels with every Board read.
+          const remote = await kanbanDetectRemote(completionGit(workspaceLookup.workspace))
           // readBoardCards owns the scan; this view adds each card's live
           // Attention Badge state (issue #6): null when the session needs
           // nothing.
@@ -590,6 +598,7 @@ return {
             ok: true,
             workspaceId: workspaceLookup.workspaceId,
             workspaceTitle: workspaceLookup.workspace.title,
+            repository: remote.repository,
             wipLimit: boardSettings.wipLimit,
             autopilot: boardSettings.autopilot,
             tickets,
@@ -600,9 +609,16 @@ return {
       }),
     )
 
-    const completionGit = (workspace) => (args, allowed = [0]) =>
-      kanbanRunHostGit(shell, workspace.path, args, { allowedExitCodes: allowed })
     const remotePollState = new Map()
+    // The sidebar watch poll runs every few seconds. Report each Workspace's
+    // remote problem once, not once per poll, and forget it when the Workspace
+    // recovers.
+    const remoteProblemsLogged = new Set()
+    const logRemoteProblemOnce = (workspaceId, message) => {
+      if (remoteProblemsLogged.has(workspaceId)) return
+      remoteProblemsLogged.add(workspaceId)
+      console.error(message)
+    }
     let remoteSweepRunning
     const pollRemoteTickets = () => {
       if (remoteSweepRunning !== undefined) return remoteSweepRunning
@@ -610,6 +626,7 @@ return {
         const now = Date.now()
         for (const workspace of registry.list()) {
           const workspaceId = String(workspace.id)
+          const workspaceLabel = String(workspace.title || workspace.path || workspaceId)
           const lookup = { workspaceId, workspace }
           const command = (args, allowed = [0]) => kanbanRunHostCommand(shell, workspace.path, args, {
             allowedExitCodes: allowed, timeoutMs: 30000, stdoutMaxBytes: 262144,
@@ -621,8 +638,15 @@ return {
               (location) => kanbanProbeRemotePlatform(location, command),
             )
           } catch (err) {
-            console.error('kanban remote detection failed: ' + String((err && err.message) || err))
+            logRemoteProblemOnce(workspaceId, 'kanban remote detection failed for ' + workspaceLabel +
+              ': ' + String((err && err.message) || err))
             continue
+          }
+          if (remote.repository === false) {
+            logRemoteProblemOnce(workspaceId, 'kanban: Workspace ' + workspaceLabel +
+              ' is not a Git repository, so Ticket execution and remote PR/MR completion are off.')
+          } else {
+            remoteProblemsLogged.delete(workspaceId)
           }
           if (remote.platform === 'none') continue
           const platform = kanbanRemotePlatformAdapter(remote, command)
@@ -784,7 +808,7 @@ return {
         allowedExitCodes: allowed, timeoutMs: 30000, stdoutMaxBytes: 1048576,
       })
       const issueGit = (args, allowed = [0]) => kanbanRunHostGit(shell, workspace.path, args, {
-        allowedExitCodes: args.length === 1 && args[0] === 'remote' ? [0, 128] : allowed,
+        allowedExitCodes: allowed,
       })
       const remote = await kanbanDetectRemote(
         issueGit,

@@ -285,3 +285,22 @@ test('Embedded Board tab renders the same header hierarchy and columns', async (
   assert.equal(columns.props.className, 'kanban-columns')
   assert.equal(columns.children[0].length, 5)
 })
+
+// A Workspace outside a Git repository is a configuration state, not a Board
+// failure: the Board keeps rendering and states the reason on its face.
+test('Board names a Workspace that is not a Git repository', async () => {
+  const { result } = await openBoard({ reply: okList([ticket()], { repository: false }) })
+  const body = result.children[1]
+  assert.deepEqual(body.children.map((child) => child.props.className), ['kanban-git-notice', 'kanban-columns'])
+  const notice = body.children[0]
+  assert.equal(notice.props.role, 'status')
+  assert.equal(notice.children[0].props.className, 'kanban-git-notice-title')
+  assert.equal(notice.children[0].children[0], 'This Workspace is not a Git repository')
+  assert.equal(notice.children[1].props.className, 'kanban-git-notice-hint')
+  assert.match(notice.children[1].children[0], /Ticket execution and remote PR\/MR completion need Git/)
+})
+
+test('Board stays quiet for a Git Workspace', async () => {
+  const { result } = await openBoard({ reply: okList([ticket()], { repository: true }) })
+  assert.equal(result.children[1].props.className, 'kanban-columns')
+})
